@@ -1,0 +1,13 @@
+{
+  "_comment": "Mapping of GoldenRace playlistId -> human-readable league name. Verified against intercepted WebSocket metadata (FbParticipant team fifaCodes) and cross-checked with the Scheduled Virtuals UI sidebar. Used by intercept-scheduled-virtuals.js to prefix console output and saved log objects with the true league name.",
+  "_verified_at": "2026-08-15",
+  "_source": "GoldenRace WebSocket event-block payloads (res.body[].playlistId) + UI sidebar league links",
+  "mappings": {
+    "41104": "England Football League",
+    "41106": "France Football League",
+    "41110": "Italy Football League",
+    "41108": "Germany Football League",
+    "41113": "Spain Football League",
+    "41114": "Turkey Football League"
+  }
+}
