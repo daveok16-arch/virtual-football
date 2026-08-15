@@ -161,11 +161,13 @@ async function captureFootball(captureSeconds) {
     // persistent connections open (analytics/polling/WS), so networkidle2 never
     // settles and times out, especially on Render's free tier. We wait for the
     // DOM + a short settle instead.
+    console.log('[capture] navigating to SportyBet landing ...');
     await page.goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await new Promise((r) => setTimeout(r, 4000));
     const origin = new URL(page.url()).origin;
     const region = new URL(page.url()).pathname.replace(/\/$/, '');
     const scheduledUrl = `${origin}${region}/virtual/#/scheduled/league/upcoming`;
+    console.log(`[capture] landing url: ${page.url()}`);
 
     // Create the CDP session BEFORE navigating to the virtuals page, so we don't
     // miss the GoldenRace WebSocket's initial fixture burst when the iframe loads.
@@ -173,8 +175,10 @@ async function captureFootball(captureSeconds) {
     await client.send('Page.enable');
     await client.send('Network.enable');
 
+    console.log(`[capture] navigating to virtuals: ${scheduledUrl}`);
     await page.goto(scheduledUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForSelector('iframe', { timeout: 30000 }).catch(() => {});
+    console.log('[capture] iframe selector present');
 
     // Discover the cross-origin virtustec iframe target and attach a sub-session
     // so we can see its network (the GoldenRace WebSocket lives here). The iframe
@@ -189,6 +193,7 @@ async function captureFootball(captureSeconds) {
       if (!iframeTarget) await new Promise((r) => setTimeout(r, 1500));
     }
     if (!iframeTarget) throw new Error('virtustec iframe target not found');
+    console.log(`[capture] found virtustec iframe: ${(iframeTarget.url || '').slice(0, 70)}`);
 
     const sub = createSubSession(client, iframeTarget.targetId);
     const attach = await client.send('Target.attachToTarget', {
@@ -197,12 +202,15 @@ async function captureFootball(captureSeconds) {
     });
     sub.sessionId = attach.sessionId;
     await sub.send('Network.enable');
+    console.log('[capture] CDP sub-session attached, Network.enable sent');
 
+    let wsFrameCount = 0;
     // Attach the WS listener immediately — the iframe's WebSocket may push the
     // initial fixture/standings burst as soon as it attaches.
     sub.on('Network.webSocketFrameReceived', (e) => {
       const payload = e.response?.payloadData || '';
       if (!payload) return;
+      wsFrameCount++;
       let parsed;
       try { parsed = JSON.parse(payload); } catch { return; }
       const body = parsed?.res?.body;
@@ -213,7 +221,10 @@ async function captureFootball(captureSeconds) {
             (ev?.data?.participants || []).some((p) => p?.classType === 'FbParticipant')) ||
           b?.stats?.groupClassification
       );
-      if (isFootball) collector.ingest(parsed);
+      if (isFootball) {
+        collector.ingest(parsed);
+        console.log(`[capture] football frame #${wsFrameCount}: ${body.length} blocks`);
+      }
     });
 
     // Give the GoldenRace SPA inside the iframe time to open its WebSocket.
@@ -223,8 +234,10 @@ async function captureFootball(captureSeconds) {
     const frameEl = await page.$(
       'iframe[src*="virtual"], iframe:not([src*="googletagmanager"])'
     );
+    console.log(`[capture] frame element found: ${!!frameEl}`);
     if (frameEl) {
       const frame = await frameEl.contentFrame();
+      console.log(`[capture] content frame accessible: ${!!frame}`);
       if (frame) {
         await frame
           .waitForFunction(
@@ -248,6 +261,7 @@ async function captureFootball(captureSeconds) {
             ).map((a) => a.getAttribute('href'))
           )
           .catch(() => []);
+        console.log(`[capture] league sidebar links found: ${links.length}`);
         for (const href of links) {
           await frame
             .evaluate((h) => {
@@ -260,10 +274,13 @@ async function captureFootball(captureSeconds) {
       }
     }
 
+    console.log(`[capture] listening for ${captureSeconds}s (ws frames so far: ${wsFrameCount}) ...`);
     // Listen for the capture window.
     await new Promise((r) => setTimeout(r, captureSeconds * 1000));
+    console.log(`[capture] capture window done — total ws frames: ${wsFrameCount}`);
   } finally {
     await browser.close().catch(() => {});
+    console.log('[capture] browser closed');
   }
 
   // De-duplicate scheduled events by eventId (latest capture wins), like predict.js.

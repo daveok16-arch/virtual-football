@@ -87,15 +87,18 @@ async function notify(message) {
     console.warn('[telegram] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — skipping.');
     return false;
   }
+  console.log(`[telegram] sending message (${message.length} chars, chat=${cfg.chatId}) ...`);
   let ok = true;
+  let sent = 0;
   for (const part of chunk(message)) {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         await sendMessage(cfg.token, cfg.chatId, part);
+        sent++;
         break;
       } catch (e) {
+        console.error(`[telegram] send attempt ${attempt} failed: ${e.message}`);
         if (attempt === 3) {
-          console.error(`[telegram] send failed: ${e.message}`);
           ok = false;
         } else {
           await new Promise((r) => setTimeout(r, 1000 * attempt));
@@ -104,6 +107,7 @@ async function notify(message) {
     }
     await new Promise((r) => setTimeout(r, 400)); // avoid rate-limit (≈30 msg/sec)
   }
+  console.log(`[telegram] done — ${sent} chunk(s) sent, ok=${ok}`);
   return ok;
 }
 

@@ -81,6 +81,14 @@ async function runOnce() {
 function main() {
   startServer();
   console.log(`[bot] interval=${INTERVAL / 1000}s capture=${CAPTURE}s`);
+  // Report Telegram config status at startup so the logs immediately show whether
+  // notifications will fire (the most common "no notification" cause: env not set).
+  const tg = require('./telegram-notify').config();
+  if (tg) {
+    console.log(`[bot] Telegram configured — chat_id=${tg.chatId}, token=...${tg.token.slice(-4)}`);
+  } else {
+    console.log('[bot] Telegram NOT configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing) — reports will print to logs only.');
+  }
   // First run immediately, then on the interval.
   runOnce();
   setInterval(runOnce, INTERVAL);
