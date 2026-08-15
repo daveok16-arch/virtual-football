@@ -24,36 +24,75 @@ function buildPredictions(leagues) {
 const esc = (s) =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/** Pretty-print a participant: "FRE (freiburg)". */
+function teamLabel(t) {
+  if (!t) return '?';
+  const code = t.code || t.fifaCode || '';
+  const name = (t.name || '').replace(/_/g, ' ');
+  return code ? `${code} (${name})` : name;
+}
+
+/** Format the eventTime as a short HH:MM UTC string (or '—' if missing). */
+function timeLabel(eventTime) {
+  if (!eventTime) return '—';
+  try {
+    const d = new Date(eventTime);
+    return d.toUTCString().slice(17, 22); // "HH:MM"
+  } catch {
+    return '—';
+  }
+}
+
 /**
  * Compose the Telegram notification. Returns a string of HTML.
- * Highlights only the actionable (HIGH/MEDIUM) picks to keep messages useful.
+ * Groups picks by league, showing league name, week/matchDay, match time,
+ * full team names, and whether the match is upcoming.
  */
 function composeReport(allPicks, meta = {}) {
   const lines = [];
-  const now = meta.capturedAt ? new Date(meta.capturedAt).toUTCString() : new Date().toUTCString();
+  const now = meta.capturedAt ? new Date(meta.capturedAt) : new Date();
   lines.push('⚽ <b>Virtual Football Predictions</b>');
-  lines.push(`Captured: ${esc(now)}`);
+  lines.push(`Captured: ${esc(now.toUTCString())}`);
   lines.push(`Matches analyzed: ${allPicks.length}`);
   const high = allPicks.filter((p) => p.pred.tier === 'HIGH');
   const med = allPicks.filter((p) => p.pred.tier === 'MEDIUM');
-  lines.push(`Confidence: HIGH ${high.length} · MEDIUM ${med.length} · LOW ${allPicks.length - high.length - med.length}`);
+  lines.push(
+    `Confidence: HIGH ${high.length} · MEDIUM ${med.length} · LOW ${allPicks.length - high.length - med.length}`
+  );
   lines.push('━'.repeat(28));
 
-  const ranked = [...allPicks].sort((a, b) => b.pred.adjustedConfidence - a.pred.adjustedConfidence);
-  const shown = ranked.filter((p) => p.pred.tier !== 'LOW').slice(0, 15);
+  const ranked = [...allPicks].sort(
+    (a, b) => b.pred.adjustedConfidence - a.pred.adjustedConfidence
+  );
+  const shown = ranked.filter((p) => p.pred.tier !== 'LOW').slice(0, 20);
+
   if (!shown.length) {
     lines.push('No high/medium-confidence picks in this capture.');
   } else {
-    lines.push('<b>Top picks (HIGH/MEDIUM):</b>');
-    shown.forEach((p, i) => {
-      const pr = p.pred;
-      const flag = pr.standingsAgreement === 'DISAGREE' ? ' ⚠️table✗' : pr.standingsAgreement === 'AGREE' ? ' ✓table' : '';
-      lines.push(
-        `${i + 1}. <b>${esc(pr.pickLabel)}</b> @ ${pr.odds[pr.pick].toFixed(2)}` +
-          ` — ${esc(pr.home.code)} vs ${esc(pr.away.code)}` +
-          ` · conf ${pct(pr.adjustedConfidence)} [${pr.tier}]${flag}`
-      );
-    });
+    // Group by league for readability.
+    const byLeague = {};
+    for (const p of shown) {
+      (byLeague[p.league] = byLeague[p.league] || []).push(p);
+    }
+    for (const [league, picks] of Object.entries(byLeague)) {
+      const week = picks[0].rec.matchDay;
+      lines.push(`\n🏆 <b>${esc(league)}</b>${week ? ` · Week ${week}` : ''}`);
+      picks.forEach((p, i) => {
+        const pr = p.pred;
+        const t = timeLabel(p.rec.eventTime);
+        const flag =
+          pr.standingsAgreement === 'DISAGREE'
+            ? ' ⚠️table✗'
+            : pr.standingsAgreement === 'AGREE'
+              ? ' ✓table'
+              : '';
+        lines.push(
+          `  ${i + 1}. <b>${esc(pr.pickLabel)}</b> @ ${pr.odds[pr.pick].toFixed(2)}` +
+            ` — ${esc(teamLabel(pr.home))} vs ${esc(teamLabel(pr.away))}` +
+            ` ⏰${t}UTC · conf ${pct(pr.adjustedConfidence)} [${pr.tier}]${flag}`
+        );
+      });
+    }
   }
 
   // Disagreements watch-list (odds vs standings) — a few of the most striking.
@@ -65,7 +104,7 @@ function composeReport(allPicks, meta = {}) {
     lines.push('⚠️ <b>Odds vs table watch-list:</b>');
     mism.forEach((p) => {
       lines.push(
-        `· ${esc(p.pred.home.code)} vs ${esc(p.pred.away.code)}` +
+        `· ${esc(teamLabel(p.pred.home))} vs ${esc(teamLabel(p.pred.away))}` +
           ` → odds favor ${esc(p.pred.pickLabel)}, table PPG Δ${p.pred.ppgGap >= 0 ? '+' : ''}${p.pred.ppgGap.toFixed(2)}`
       );
     });
@@ -76,7 +115,9 @@ function composeReport(allPicks, meta = {}) {
     lines.push(`House edge (1X2 vig): ${pct(meta.avgVig)}`);
   }
   lines.push('');
-  lines.push(`<i>Confidence = de-vigged P(correct). Virtual football is RNG + house vig — cannot beat vig long-term.</i>`);
+  lines.push(
+    '<i>Confidence = de-vigged P(correct). Match times in UTC. Virtual football is RNG + house vig — cannot beat vig long-term.</i>'
+  );
   return lines.join('\n');
 }
 

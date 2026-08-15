@@ -61,10 +61,17 @@ function newLeagues() {
         if (isFbStandings(b)) Object.assign(L.standings, buildStandings(b));
         if (isFbEvents(b)) {
           const md = b.data?.matchDay;
+          const eventTime = b.eventTime;
           for (const ev of b.events || []) {
             const id = ev.eventId;
             if (id == null) continue;
-            const rec = { ev, matchDay: md, eBlockId: b.eBlockId, status: b.serverStatus };
+            const rec = {
+              ev,
+              matchDay: md,
+              eventTime,
+              eBlockId: b.eBlockId,
+              status: b.serverStatus,
+            };
             if (b.serverStatus === 'RESOLVED') L._resolved.set(id, rec);
             else L._scheduled.set(id, rec);
           }
