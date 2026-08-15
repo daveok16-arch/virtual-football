@@ -108,6 +108,7 @@ function composeReport(allPicks, meta = {}) {
   const sections = groupByLeagueWeek(allPicks.filter((p) => p.pred.tier !== 'LOW'));
 
   for (const sec of sections) {
+    lines.push(`\n🏆 ${esc(sec.league)}`);
     for (const w of sec.weeks) {
       const best = w.picks[0]; // already sorted by confidence desc
       if (!best) continue;
@@ -118,8 +119,7 @@ function composeReport(allPicks, meta = {}) {
         pr.standingsAgreement === 'AGREE' ? ' ✓' :
         pr.standingsAgreement === 'DISAGREE' ? ' ⚠️' : '';
       lines.push(
-        `${esc(sec.league)} W${w.week} · ${t}` +
-          `\n  <b>${sym}</b> ${esc(code(pr.home))} v ${esc(code(pr.away))}` +
+        `  W${w.week} · ${t}  <b>${sym}</b> ${esc(code(pr.home))} v ${esc(code(pr.away))}` +
           ` @ ${pr.odds[pr.pick].toFixed(2)} · ${pct(pr.adjustedConfidence)}${agree}`
       );
     }
