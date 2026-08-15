@@ -300,7 +300,7 @@ async function main() {
     );
 
     // ---- Step 1: Navigate and wait for the cross-origin iframe ------------
-    console.log(`[1/4] Navigating to ${START_URL} ...`);
+    console.log(`[1/5] Navigating to ${START_URL} ...`);
     await page.goto(START_URL, { waitUntil: 'networkidle2' });
     const origin = new URL(page.url()).origin;
     const region = new URL(page.url()).pathname.replace(/\/$/, '');
@@ -315,6 +315,7 @@ async function main() {
     // Page-level session (captures the main sportybet.com traffic).
     const client = await page.target().createCDPSession();
     await client.send('Network.enable');
+    console.log('[2/5] CDP Network.enable sent on page session.');
 
     // Discover the cross-origin iframe target and attach a sub-session so we
     // can see ITS network (the GoldenRace WebSocket lives here).
@@ -348,7 +349,7 @@ async function main() {
     });
     sub.sessionId = attachResp.sessionId;
     await sub.send('Network.enable');
-    console.log('      Network.enable sent on iframe sub-session.');
+    console.log('[3/5] Network.enable sent on iframe sub-session; attaching listeners...');
 
     // ---- Step 3: Attach event listeners to catch incoming data streams ---
     // Track HTTP request URLs so loadingFinished can fetch the right body.
@@ -458,6 +459,11 @@ async function main() {
     const frameEl = await page.$(
       'iframe[src*="virtual"], iframe:not([src*="googletagmanager"])'
     );
+    if (!frameEl) {
+      throw new Error(
+        'Could not find the virtuals iframe on the page — the SPA may not have loaded.'
+      );
+    }
     const frame = await frameEl.contentFrame();
     await frame
       .waitForFunction(
@@ -498,7 +504,7 @@ async function main() {
     }
 
     // ---- Perpetual wait: keep the stream alive until interrupted ----------
-    console.log('\n[4/4] Live interception active. Listening for fixture streams...');
+    console.log('\n[5/5] Live interception active. Listening for fixture streams...');
     console.log('      (Press Ctrl+C to stop. Logging to ' + OUTPUT_LOG + ')');
     console.log('      League mappings loaded from ' + LEAGUE_MAPPINGS_FILE + ':');
     Object.entries(LEAGUE_NAMES).forEach(([pid, name]) =>

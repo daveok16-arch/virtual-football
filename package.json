@@ -1,12 +1,14 @@
 {
   "name": "sportybet-scheduled-virtuals-scraper",
   "version": "1.0.0",
-  "description": "Puppeteer scraper for SportyBet Scheduled Virtuals via cross-origin iframe handling",
-  "main": "scrape-scheduled-virtual-football.js",
+  "description": "Puppeteer interceptor for SportyBet Scheduled Virtual Football via GoldenRace WebSocket CDP interception",
+  "main": "intercept-scheduled-virtuals.js",
   "scripts": {
-    "scrape": "node scrape-scheduled-virtuals.js",
-    "scrape:football": "node scrape-scheduled-virtual-football.js",
-    "intercept": "node intercept-scheduled-virtuals.js"
+    "intercept": "node intercept-scheduled-virtuals.js",
+    "start": "node bot-runner.js",
+    "bot": "node bot-runner.js",
+    "predict": "node predict.js",
+    "backtest": "node predict.js backtest"
   },
   "dependencies": {
     "puppeteer": "^23.0.0"

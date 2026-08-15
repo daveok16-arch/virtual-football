@@ -1,14 +1,14 @@
 {
   "_comment": "Live snapshot of the current season week (matchDay) for each scheduled virtual football league on SportyBet, captured directly from the GoldenRace WebSocket metadata frames (res.body[].data.classType == 'FbEventBlockData', field matchDay). Virtual seasons cycle continuously, so these numbers advance in real time — re-run `node intercept-scheduled-virtuals.js` for the latest.",
-  "_captured_at": "2026-08-15T05:17Z",
+  "_captured_at": "2026-08-15T09:55Z",
   "_source_field": "matchDay (from FbEventBlockData)",
   "_phase": "GROUPS",
   "leagues": {
-    "41104": { "name": "England Football League", "matchDay": 30, "weekDay": 1, "legOrder": 2, "phase": "GROUPS" },
-    "41106": { "name": "France Football League", "matchDay": 11, "weekDay": 1, "legOrder": 1, "phase": "GROUPS" },
-    "41108": { "name": "Germany Football League", "matchDay": 32, "weekDay": 1, "legOrder": 2, "phase": "GROUPS" },
-    "41110": { "name": "Italy Football League", "matchDay": 34, "weekDay": 1, "legOrder": 2, "phase": "GROUPS" },
-    "41113": { "name": "Spain Football League", "matchDay": 35, "weekDay": 1, "legOrder": 2, "phase": "GROUPS" },
-    "41114": { "name": "Turkey Football League", "matchDay": 23, "weekDay": 1, "legOrder": 2, "phase": "GROUPS" }
+    "41104": { "name": "England Football League", "matchDay": 21, "weekDay": 1, "legOrder": 2, "phase": "GROUPS", "top5": "ARS(41), LIV(35), AST(35), BHA(33), FOR(33)" },
+    "41106": { "name": "France Football League", "matchDay": 9, "weekDay": 1, "legOrder": 1, "phase": "GROUPS", "top5": "MRS(18), PSG(17), SBR(14), MON(13), TRY(13)" },
+    "41108": { "name": "Germany Football League", "matchDay": 30, "weekDay": 1, "legOrder": 2, "phase": "GROUPS", "top5": "BMU(58), STU(55), LEV(51), RBL(48), FRA(47)" },
+    "41110": { "name": "Italy Football League", "matchDay": 20, "weekDay": 1, "legOrder": 2, "phase": "GROUPS", "top5": "JUV(40), NAP(39), ROM(38), MIL(36), INT(34)" },
+    "41113": { "name": "Spain Football League", "matchDay": 21, "weekDay": 1, "legOrder": 2, "phase": "GROUPS", "top5": "BAR(48), RMA(46), RSO(35), GET(34), ATM(33)" },
+    "41114": { "name": "Turkey Football League", "matchDay": 21, "weekDay": 1, "legOrder": 2, "phase": "GROUPS", "top5": "GOZ(39), BES(36), CAY(34), GAL(30), TRA(30)" }
   }
 }

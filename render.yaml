@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: virtual-football-prediction-bot
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # set in Render dashboard — secret, never committed
+      - key: TELEGRAM_CHAT_ID
+        sync: false  # set in Render dashboard — secret, never committed
+      - key: RUN_INTERVAL_SECONDS
+        value: "300"
+      - key: CAPTURE_SECONDS
+        value: "90"
+      - key: PUPPETEER_EXECUTABLE_PATH
+        value: /usr/bin/chromium
