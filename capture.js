@@ -132,10 +132,16 @@ async function captureFootball(captureSeconds) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-gpu',
       '--disable-web-security',
       '--disable-features=IsolateOrigins,site-per-process',
+      // Render free tier is memory-constrained; trim Chromium's footprint.
+      '--disable-extensions',
+      '--disable-default-apps',
+      '--no-first-run',
+      '--mute-audio',
     ],
-    defaultViewport: { width: 1440, height: 900 },
+    defaultViewport: { width: 1280, height: 800 },
   };
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
     launchOpts.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
@@ -151,22 +157,30 @@ async function captureFootball(captureSeconds) {
 
     // Navigate to the region landing page first, then to the Scheduled Virtuals
     // view — the GoldenRace (virtustec) iframe only loads on the virtuals page.
-    await page.goto(START_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+    // NOTE: use 'domcontentloaded' (not 'networkidle2') — SportyBet keeps
+    // persistent connections open (analytics/polling/WS), so networkidle2 never
+    // settles and times out, especially on Render's free tier. We wait for the
+    // DOM + a short settle instead.
+    await page.goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await new Promise((r) => setTimeout(r, 4000));
     const origin = new URL(page.url()).origin;
     const region = new URL(page.url()).pathname.replace(/\/$/, '');
     const scheduledUrl = `${origin}${region}/virtual/#/scheduled/league/upcoming`;
-    await page.goto(scheduledUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-    await page.waitForSelector('iframe', { timeout: 30000 });
-    // Give the GoldenRace SPA inside the iframe time to open its WebSocket.
-    await new Promise((r) => setTimeout(r, 6000));
 
+    // Create the CDP session BEFORE navigating to the virtuals page, so we don't
+    // miss the GoldenRace WebSocket's initial fixture burst when the iframe loads.
     const client = await page.target().createCDPSession();
     await client.send('Page.enable');
     await client.send('Network.enable');
 
-    // Discover the cross-origin virtustec iframe target (may still be initializing).
+    await page.goto(scheduledUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForSelector('iframe', { timeout: 30000 }).catch(() => {});
+
+    // Discover the cross-origin virtustec iframe target and attach a sub-session
+    // so we can see its network (the GoldenRace WebSocket lives here). The iframe
+    // may still be initializing, so retry patiently.
     let iframeTarget;
-    for (let i = 0; !iframeTarget && i < 15; i++) {
+    for (let i = 0; !iframeTarget && i < 20; i++) {
       const t = await client.send('Target.getTargets');
       iframeTarget = t.targetInfos.find(
         (x) =>
@@ -184,6 +198,8 @@ async function captureFootball(captureSeconds) {
     sub.sessionId = attach.sessionId;
     await sub.send('Network.enable');
 
+    // Attach the WS listener immediately — the iframe's WebSocket may push the
+    // initial fixture/standings burst as soon as it attaches.
     sub.on('Network.webSocketFrameReceived', (e) => {
       const payload = e.response?.payloadData || '';
       if (!payload) return;
@@ -199,6 +215,9 @@ async function captureFootball(captureSeconds) {
       );
       if (isFootball) collector.ingest(parsed);
     });
+
+    // Give the GoldenRace SPA inside the iframe time to open its WebSocket.
+    await new Promise((r) => setTimeout(r, 6000));
 
     // Trigger each league's WS subscription by clicking through the sidebar.
     const frameEl = await page.$(

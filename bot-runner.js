@@ -27,6 +27,15 @@ const INTERVAL = (Number(process.env.RUN_INTERVAL_SECONDS) || 300) * 1000;
 const CAPTURE = Number(process.env.CAPTURE_SECONDS) || 90;
 let running = false;
 
+// Never let an unexpected error crash the service — Render would restart it and
+// we'd lose the health server. Log and keep going.
+process.on('unhandledRejection', (e) => {
+  console.error('[bot] unhandledRejection:', e && e.message ? e.message : e);
+});
+process.on('uncaughtException', (e) => {
+  console.error('[bot] uncaughtException:', e && e.message ? e.message : e);
+});
+
 async function runOnce() {
   if (running) {
     console.log('[bot] previous run still active — skipping this tick');
