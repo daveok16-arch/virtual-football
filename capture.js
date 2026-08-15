@@ -38,9 +38,16 @@ const isFbStandings = (b) => !!b?.stats?.groupClassification;
 
 /** In-memory collector that mirrors predict.js.loadCaptures output. */
 function newLeagues() {
+  // Deduplicate DURING ingestion using Maps keyed by eventId — GoldenRace
+  // re-sends the same events in every frame, so an array would grow unbounded
+  // and OOM the 512MB Render free tier before the capture window finishes.
   const leagues = {};
   const get = (pid) =>
-    (leagues[pid] = leagues[pid] || { standings: {}, scheduled: [], resolved: [] });
+    (leagues[pid] = leagues[pid] || {
+      standings: {},
+      _scheduled: new Map(),
+      _resolved: new Map(),
+    });
   return {
     leagues,
     ingest(parsed) {
@@ -55,12 +62,35 @@ function newLeagues() {
         if (isFbEvents(b)) {
           const md = b.data?.matchDay;
           for (const ev of b.events || []) {
+            const id = ev.eventId;
+            if (id == null) continue;
             const rec = { ev, matchDay: md, eBlockId: b.eBlockId, status: b.serverStatus };
-            if (b.serverStatus === 'RESOLVED') L.resolved.push(rec);
-            else L.scheduled.push(rec);
+            if (b.serverStatus === 'RESOLVED') L._resolved.set(id, rec);
+            else L._scheduled.set(id, rec);
           }
         }
       }
+    },
+    // Flatten the Maps to arrays for the prediction model.
+    finalize() {
+      for (const L of Object.values(leagues)) {
+        L.scheduled = Array.from(L._scheduled.values());
+        L.resolved = Array.from(L._resolved.values());
+        delete L._scheduled;
+        delete L._resolved;
+      }
+      return leagues;
+    },
+    // Quick stats for early-exit logic without finalizing.
+    stats() {
+      let s = 0, r = 0, n = 0, std = 0;
+      for (const L of Object.values(leagues)) {
+        n++;
+        s += L._scheduled.size;
+        r += L._resolved.size;
+        std += Object.keys(L.standings).length;
+      }
+      return { leagues: n, scheduled: s, resolved: r, standingsTeams: std };
     },
   };
 }
@@ -274,27 +304,37 @@ async function captureFootball(captureSeconds) {
       }
     }
 
-    console.log(`[capture] listening for ${captureSeconds}s (ws frames so far: ${wsFrameCount}) ...`);
-    // Listen for the capture window.
-    await new Promise((r) => setTimeout(r, captureSeconds * 1000));
-    console.log(`[capture] capture window done — total ws frames: ${wsFrameCount}`);
+    // Capture window with EARLY EXIT — once we have enough data we stop
+    // immediately instead of idling the full 90s (saves memory + time on the
+    // 512MB Render free tier). The "enough" threshold: ≥4 leagues with fixtures
+    // OR the full window elapses.
+    const EARLY_EXIT_LEAGUES = 4;
+    const EARLY_EXIT_MIN_SCHEDULED = 100;
+    console.log(`[capture] listening up to ${captureSeconds}s (early-exit @ ${EARLY_EXIT_LEAGUES} leagues / ${EARLY_EXIT_MIN_SCHEDULED} matches) ...`);
+    const start = Date.now();
+    let earlyExit = false;
+    while (Date.now() - start < captureSeconds * 1000) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const st = collector.stats();
+      if (
+        st.leagues >= EARLY_EXIT_LEAGUES &&
+        st.scheduled >= EARLY_EXIT_MIN_SCHEDULED
+      ) {
+        earlyExit = true;
+        console.log(`[capture] early-exit threshold met: ${JSON.stringify(st)}`);
+        break;
+      }
+    }
+    const st = collector.stats();
+    console.log(
+      `[capture] ${earlyExit ? 'early-exit' : 'window done'} — ws frames: ${wsFrameCount}, ${JSON.stringify(st)}`
+    );
   } finally {
     await browser.close().catch(() => {});
     console.log('[capture] browser closed');
   }
 
-  // De-duplicate scheduled events by eventId (latest capture wins), like predict.js.
-  for (const L of Object.values(collector.leagues)) {
-    const seen = new Set();
-    const sched = [];
-    for (const rec of [...L.scheduled].reverse()) {
-      const id = rec.ev.eventId;
-      if (id && seen.has(id)) continue;
-      seen.add(id);
-      sched.unshift(rec);
-    }
-    L.scheduled = sched;
-  }
+  collector.finalize();
   return collector.leagues;
 }
 
