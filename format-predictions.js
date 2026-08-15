@@ -64,7 +64,7 @@ function pickSymbol(pred) {
 const TIER_ICON = { HIGH: '🟢', MEDIUM: '🟡', LOW: '⚪' };
 
 /**
- * Group picks into league → week → [picks sorted by kick-off time].
+ * Group picks into league → week → [picks sorted by confidence desc].
  * Weeks are sorted numerically. Returns an ordered array of league sections.
  */
 function groupByLeagueWeek(allPicks) {
@@ -80,7 +80,9 @@ function groupByLeagueWeek(allPicks) {
     const weekEntries = Object.entries(weeks)
       .map(([wk, picks]) => ({
         week: Number(wk),
-        picks: picks.sort((a, b) => timeSortKey(a.rec.eventTime) - timeSortKey(b.rec.eventTime)),
+        picks: picks.sort(
+          (a, b) => b.pred.adjustedConfidence - a.pred.adjustedConfidence
+        ),
       }))
       .sort((a, b) => a.week - b.week);
     sections.push({ league, weeks: weekEntries });
@@ -89,103 +91,45 @@ function groupByLeagueWeek(allPicks) {
 }
 
 /**
- * Compose the "Top Picks" summary — HIGH-confidence picks only, grouped by
- * league → week → time. This is the actionable notification.
+ * Compose a single clean message: the TOP pick per league per week.
+ * Only HIGH/MEDIUM confidence. One line per pick. No noise.
  */
-function composeTopPicks(allPicks, meta = {}) {
+function composeReport(allPicks, meta = {}) {
   const lines = [];
   const now = meta.capturedAt ? new Date(meta.capturedAt) : new Date();
   const high = allPicks.filter((p) => p.pred.tier === 'HIGH');
   const med = allPicks.filter((p) => p.pred.tier === 'MEDIUM');
-  const low = allPicks.filter((p) => p.pred.tier === 'LOW');
 
-  lines.push('⚽ <b>Virtual Football — Top Picks</b>');
-  lines.push(`📅 ${esc(now.toUTCString())}`);
-  lines.push(`📊 ${allPicks.length} matches | 🟢${high.length} 🟡${med.length} ⚪${low.length}`);
-  if (meta.avgVig != null) lines.push(`💰 House vig: ${pct(meta.avgVig)}`);
-  lines.push('━'.repeat(20));
+  lines.push('⚽ <b>Top Picks</b>');
+  lines.push(esc(now.toUTCString().slice(0, 22)));
+  lines.push('━'.repeat(16));
 
-  if (!high.length) {
-    lines.push('No HIGH-confidence picks this cycle.');
-    lines.push('');
-    lines.push('<i>Confidence = de-vigged P(correct). Match times in UTC.</i>');
-    return lines.join('\n');
+  // Group by league → week, pick the SINGLE best from each.
+  const sections = groupByLeagueWeek(allPicks.filter((p) => p.pred.tier !== 'LOW'));
+
+  for (const sec of sections) {
+    for (const w of sec.weeks) {
+      const best = w.picks[0]; // already sorted by confidence desc
+      if (!best) continue;
+      const pr = best.pred;
+      const sym = pickSymbol(pr);
+      const t = timeLabel(best.rec.eventTime);
+      const agree =
+        pr.standingsAgreement === 'AGREE' ? ' ✓' :
+        pr.standingsAgreement === 'DISAGREE' ? ' ⚠️' : '';
+      lines.push(
+        `${esc(sec.league)} W${w.week} · ${t}` +
+          `\n  <b>${sym}</b> ${esc(code(pr.home))} v ${esc(code(pr.away))}` +
+          ` @ ${pr.odds[pr.pick].toFixed(2)} · ${pct(pr.adjustedConfidence)}${agree}`
+      );
+    }
   }
 
-  const highPicks = high.sort(
-    (a, b) => b.pred.adjustedConfidence - a.pred.adjustedConfidence
+  lines.push('');
+  lines.push(
+    `<i>${allPicks.length} matches · 🟢${high.length} 🟡${med.length} · vig ${meta.avgVig != null ? pct(meta.avgVig) : '?'} · UTC</i>`
   );
-  const sections = groupByLeagueWeek(highPicks);
-
-  for (const sec of sections) {
-    lines.push(`\n🏆 <b>${esc(sec.league)}</b>`);
-    for (const w of sec.weeks) {
-      lines.push(`  📆 Week ${w.week}`);
-      for (const p of w.picks) {
-        const pr = p.pred;
-        const flag =
-          pr.standingsAgreement === 'DISAGREE'
-            ? ' ⚠️'
-            : pr.standingsAgreement === 'AGREE'
-              ? ' ✓'
-              : '';
-        lines.push(
-          `  ⏰${timeLabel(p.rec.eventTime)}  <b>${pickSymbol(pr)}</b>@${pr.odds[pr.pick].toFixed(2)}` +
-            `  ${esc(code(pr.home))} v ${esc(code(pr.away))}` +
-            `  ${pct(pr.adjustedConfidence)}${flag}`
-        );
-      }
-    }
-  }
-
-  lines.push('');
-  lines.push('<i>🟢≥55% 🟡≥40% ⚪<40% · ✓table agrees ⚠️table disagrees · Times in UTC</i>');
   return lines.join('\n');
-}
-
-/**
- * Compose the "Full Schedule" — ALL matches grouped by league → week → time,
- * in a compact table-like list. Sent as a second message so the top-picks
- * summary stays concise.
- */
-function composeFullSchedule(allPicks, meta = {}) {
-  const lines = [];
-  const now = meta.capturedAt ? new Date(meta.capturedAt) : new Date();
-  lines.push('📋 <b>Virtual Football — Full Schedule</b>');
-  lines.push(`📅 ${esc(now.toUTCString())} · ${allPicks.length} matches`);
-  lines.push('━'.repeat(20));
-
-  const sections = groupByLeagueWeek(allPicks);
-
-  for (const sec of sections) {
-    lines.push(`\n🏆 <b>${esc(sec.league)}</b>`);
-    for (const w of sec.weeks) {
-      lines.push(`  📆 Week ${w.week}  (${w.picks.length} matches)`);
-      for (const p of w.picks) {
-        const pr = p.pred;
-        const icon = TIER_ICON[pr.tier] || '⚪';
-        const flag =
-          pr.standingsAgreement === 'DISAGREE'
-            ? '⚠️'
-            : pr.standingsAgreement === 'AGREE'
-              ? '✓'
-              : ' ';
-        lines.push(
-          `  ${icon}⏰${timeLabel(p.rec.eventTime)} ${pickSymbol(pr)}@${pr.odds[pr.pick].toFixed(2)}` +
-            ` ${esc(code(pr.home))}v${esc(code(pr.away))} ${pct(pr.adjustedConfidence)}${flag}`
-        );
-      }
-    }
-  }
-
-  lines.push('');
-  lines.push('<i>1=Home X=Draw 2=Away · 🟢HIGH 🟡MED ⚪LOW · ✓/⚠️ table agreement · UTC</i>');
-  return lines.join('\n');
-}
-
-/** Backward-compatible single-message report (top picks + watch-list). */
-function composeReport(allPicks, meta = {}) {
-  return composeTopPicks(allPicks, meta);
 }
 
 /** Compute slate-wide metadata (avg vig) for the report. */
@@ -198,7 +142,5 @@ function slateMeta(allPicks) {
 module.exports = {
   buildPredictions,
   composeReport,
-  composeTopPicks,
-  composeFullSchedule,
   slateMeta,
 };

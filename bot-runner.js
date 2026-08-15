@@ -20,7 +20,7 @@
  */
 const { start: startServer, setState } = require('./server');
 const { captureFootball } = require('./capture');
-const { buildPredictions, composeTopPicks, composeFullSchedule, slateMeta } = require('./format-predictions');
+const { buildPredictions, composeReport, slateMeta } = require('./format-predictions');
 const { notify } = require('./telegram-notify');
 
 const INTERVAL = (Number(process.env.RUN_INTERVAL_SECONDS) || 300) * 1000;
@@ -48,23 +48,15 @@ async function runOnce() {
     const leagues = await captureFootball(CAPTURE);
     const allPicks = buildPredictions(leagues);
     const meta = { capturedAt, ...slateMeta(allPicks) };
-    const topPicksMsg = composeTopPicks(allPicks, meta);
-    const fullSchedMsg = composeFullSchedule(allPicks, meta);
+    const report = composeReport(allPicks, meta);
 
     const nLeagues = Object.keys(leagues).length;
     const summary = `${allPicks.length} matches across ${nLeagues} leagues`;
     console.log(`[bot] captured ${summary}`);
-    console.log('\n--- Top Picks ---');
-    console.log(topPicksMsg.replace(/<[^>]+>/g, ''));
-    console.log('\n--- Full Schedule ---');
-    console.log(fullSchedMsg.replace(/<[^>]+>/g, '') + '\n');
+    console.log('\n' + report.replace(/<[^>]+>/g, '') + '\n');
 
-    // Send Top Picks first, then Full Schedule as a second message.
-    const tgOk1 = await notify(topPicksMsg);
-    await new Promise((r) => setTimeout(r, 1000));
-    const tgOk2 = await notify(fullSchedMsg);
-    const tgOk = tgOk1 && tgOk2;
-    if (!tgOk) console.log('[bot] (Telegram not configured or partial failure — report printed above)');
+    const tgOk = await notify(report);
+    if (!tgOk) console.log('[bot] (Telegram not configured or failed — report printed above)');
 
     setState({
       lastRunAt: capturedAt,
