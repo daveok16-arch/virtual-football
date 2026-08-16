@@ -151,31 +151,42 @@ function composeReport(allPicks, meta = {}) {
 }
 
 /**
- * Compose the "Value Bets" message — +EV picks (predicted edge > 0) sorted by EV.
- * Only emitted when the predictions carry the EV layer (calibration was applied);
- * returns null when there are no +EV bets, so the caller can skip the message.
+ * Compose the "Value Bets" message — +EV picks grouped by league → week,
+ * mirroring the Top Picks layout. Shows the single best +EV pick per league
+ * per week (highest edge), so the reader can locate bets by league/week just
+ * like the top-picks report. Only emitted when the predictions carry the EV
+ * layer (calibration was applied); returns null when there are no +EV bets.
  */
 function composeValuePicks(allPicks, meta = {}) {
   const value = allPicks.filter((p) => p.pred.valueEv != null && p.pred.valueEv > 0);
   if (!value.length) return null;
   const now = meta.capturedAt ? new Date(meta.capturedAt) : new Date();
   const lines = [];
-  lines.push('💰 <b>Virtual Football — Value Bets (+EV)</b>');
-  lines.push(`📅 ${esc(now.toUTCString())} · ${value.length} +EV picks`);
+  lines.push('💰 <b>Value Bets (+EV)</b>');
+  lines.push(esc(now.toUTCString().slice(0, 22)));
   lines.push('━'.repeat(20));
 
-  const ranked = value.sort((a, b) => b.pred.valueEv - a.pred.valueEv).slice(0, 15);
-  for (const p of ranked) {
-    const pr = p.pred;
-    const sym = { home: '1', draw: 'X', away: '2' }[pr.valuePick] || '?';
-    const diff = pr.valuePick !== pr.pick ? ` ⚡fav ${pickSymbol(pr)}` : '';
-    lines.push(
-      `  ${sym}@${pr.odds[pr.valuePick].toFixed(2)} ${esc(code(pr.home))}v${esc(code(pr.away))}` +
-        ` EV ${pr.valueEv >= 0 ? '+' : ''}${(pr.valueEv * 100).toFixed(0)}%${diff}`
-    );
+  const sections = groupByLeagueWeek(value);
+  for (const sec of sections) {
+    lines.push(`\n🏆 ${esc(sec.league)}`);
+    for (const w of sec.weeks) {
+      // Re-sort by EV desc (groupByLeagueWeek sorted by confidence) and take the top.
+      w.picks.sort((a, b) => (b.pred.valueEv || 0) - (a.pred.valueEv || 0));
+      const best = w.picks[0];
+      if (!best) continue;
+      const pr = best.pred;
+      const sym = { home: '1', draw: 'X', away: '2' }[pr.valuePick] || '?';
+      const t = timeLabel(best.rec.eventTime);
+      const diff = pr.valuePick !== pr.pick ? ` ⚡${pickSymbol(pr)}` : '';
+      lines.push(
+        `  W${w.week} · ${t}  <b>${sym}</b> ${esc(code(pr.home))} v ${esc(code(pr.away))}` +
+          ` @ ${pr.odds[pr.valuePick].toFixed(2)} · EV +${(pr.valueEv * 100).toFixed(0)}%${diff}`
+      );
+    }
   }
+
   lines.push('');
-  lines.push('<i>EV = odds × calibrated P − 1. +EV = price beats the bias-corrected truth.</i>');
+  lines.push(`<i>${value.length} +EV bets · EV = odds × calibrated P − 1 · UTC</i>`);
   return lines.join('\n');
 }
 
