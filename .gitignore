@@ -18,3 +18,5 @@ virtual-football-live.ndjson
 *.swp
 .idea/
 .vscode/
+# Persisted calibration training data (accumulated resolved matches)
+calibration-data.json

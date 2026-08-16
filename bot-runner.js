@@ -22,6 +22,7 @@ const { start: startServer, setState } = require('./server');
 const { captureFootball } = require('./capture');
 const { buildPredictions, composeReport, composeValuePicks, slateMeta } = require('./format-predictions');
 const { notify } = require('./telegram-notify');
+const { loadStore, saveStore, mergeResolved, calSamples } = require('./calibration-store');
 
 const INTERVAL = (Number(process.env.RUN_INTERVAL_SECONDS) || 300) * 1000;
 const CAPTURE = Number(process.env.CAPTURE_SECONDS) || 90;
@@ -46,7 +47,16 @@ async function runOnce() {
   console.log(`[bot] run # starting — capturing for ${CAPTURE}s ...`);
   try {
     const leagues = await captureFootball(CAPTURE);
-    const allPicks = buildPredictions(leagues);
+
+    // Persist newly-captured resolved matches into the calibration store so the
+    // calibration trains on an accumulating sample (stabilises the draw rate
+    // across runs instead of swinging with each 57-match capture).
+    const store = loadStore();
+    const added = mergeResolved(store, leagues);
+    if (added > 0) saveStore(store);
+    console.log(`[bot] calibration store: ${store.matches.length} matches (+${added} new)`);
+
+    const allPicks = buildPredictions(leagues, { calSamples: calSamples(store) });
     const meta = { capturedAt, ...slateMeta(allPicks) };
     const report = composeReport(allPicks, meta);
     const valueMsg = composeValuePicks(allPicks, meta);

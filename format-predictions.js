@@ -13,7 +13,7 @@ const pct = (x) => `${(x * 100).toFixed(0)}%`;
  * learned from the resolved set and applied to the scheduled set so each prediction
  * carries calibratedProbabilities + per-outcome EV + valuePick (+EV outcome).
  */
-function buildPredictions(leagues, { withValue = true } = {}) {
+function buildPredictions(leagues, { withValue = true, calSamples: extraCalSamples = null } = {}) {
   let cal = null;
   if (withValue) {
     const train = [];
@@ -24,6 +24,10 @@ function buildPredictions(leagues, { withValue = true } = {}) {
         if (pred && actual) train.push({ pred, actual });
       }
     }
+    // Merge accumulated samples from the calibration store (persists across
+    // bot runs) so the calibration reflects the true outcome distribution,
+    // not just the current capture's volatile 57-match sample.
+    if (extraCalSamples) train.push(...extraCalSamples);
     if (train.length >= 10) cal = learnCalibration(train);
   }
 
