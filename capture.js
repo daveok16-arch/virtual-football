@@ -311,24 +311,42 @@ async function captureFootball(captureSeconds) {
       }
     }
 
-    // Capture window with EARLY EXIT — once we have enough data we stop
-    // immediately instead of idling the full 90s (saves memory + time on the
-    // 512MB Render free tier). The "enough" threshold: ≥4 leagues with fixtures
-    // OR the full window elapses.
+    // Capture window with EARLY EXIT. We want enough data to (a) produce top
+    // picks AND (b) learn the calibration that powers the +EV value-bets layer.
+    // The calibration needs ≥10 RESOLVED matches (past results), which arrive in
+    // the initial WS subscription burst — so we must NOT exit before they arrive.
+    // We exit early only once BOTH thresholds are met, with a stall fallback so
+    // we don't hang if GoldenRace stops sending data.
     const EARLY_EXIT_LEAGUES = 4;
     const EARLY_EXIT_MIN_SCHEDULED = 100;
-    console.log(`[capture] listening up to ${captureSeconds}s (early-exit @ ${EARLY_EXIT_LEAGUES} leagues / ${EARLY_EXIT_MIN_SCHEDULED} matches) ...`);
+    const EARLY_EXIT_MIN_RESOLVED = 10;
+    const STALL_MS = 20000; // exit if no new data for this long (after meeting scheduled threshold)
+    console.log(
+      `[capture] listening up to ${captureSeconds}s ` +
+        `(early-exit @ ${EARLY_EXIT_LEAGUES} leagues / ${EARLY_EXIT_MIN_SCHEDULED} sched / ${EARLY_EXIT_MIN_RESOLVED} resolved) ...`
+    );
     const start = Date.now();
+    let lastDataAt = Date.now();
+    let prevKey = '';
     let earlyExit = false;
     while (Date.now() - start < captureSeconds * 1000) {
       await new Promise((r) => setTimeout(r, 3000));
       const st = collector.stats();
-      if (
-        st.leagues >= EARLY_EXIT_LEAGUES &&
-        st.scheduled >= EARLY_EXIT_MIN_SCHEDULED
-      ) {
+      const key = `${st.leagues}:${st.scheduled}:${st.resolved}`;
+      if (key !== prevKey) { lastDataAt = Date.now(); prevKey = key; }
+      const stalled = Date.now() - lastDataAt > STALL_MS;
+      const schedMet = st.leagues >= EARLY_EXIT_LEAGUES && st.scheduled >= EARLY_EXIT_MIN_SCHEDULED;
+      const resolvedMet = st.resolved >= EARLY_EXIT_MIN_RESOLVED;
+      if (schedMet && resolvedMet) {
         earlyExit = true;
-        console.log(`[capture] early-exit threshold met: ${JSON.stringify(st)}`);
+        console.log(`[capture] early-exit: both thresholds met ${JSON.stringify(st)}`);
+        break;
+      }
+      // If scheduled threshold is met but we've stalled (no new data for 20s),
+      // GoldenRace has likely finished its burst — exit rather than idle.
+      if (schedMet && stalled) {
+        earlyExit = true;
+        console.log(`[capture] early-exit (stalled, resolved=${st.resolved}): ${JSON.stringify(st)}`);
         break;
       }
     }
@@ -336,6 +354,13 @@ async function captureFootball(captureSeconds) {
     console.log(
       `[capture] ${earlyExit ? 'early-exit' : 'window done'} — ws frames: ${wsFrameCount}, ${JSON.stringify(st)}`
     );
+    if (st.resolved < EARLY_EXIT_MIN_RESOLVED) {
+      console.warn(
+        `[capture] WARNING: only ${st.resolved} resolved matches captured — ` +
+          `calibration will be skipped (need ≥${EARLY_EXIT_MIN_RESOLVED}). ` +
+          `Value-bets layer will be omitted from this report.`
+      );
+    }
   } finally {
     await browser.close().catch(() => {});
     console.log('[capture] browser closed');
