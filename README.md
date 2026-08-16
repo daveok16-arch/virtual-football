@@ -36,7 +36,7 @@ well-calibrated (predicted 61% → actual 62.5%); MEDIUM/LOW tiers over-predict.
 | `intercept-scheduled-virtuals.js` | Manual CDP interception CLI (perpetual listener, logs NDJSON) |
 | `capture.js` | Reusable capture function (importable, bounded window) |
 | `virtual-football-model.js` | Prediction engine: de-vig odds, standings corroboration, confidence |
-| `predict.js` | CLI: `predict` (live predictions + overhead) / `backtest` (calibration) |
+| `predict.js` | CLI: `predict` (live predictions + overhead) / `backtest` (calibration + LOOCV EV) / `ev` (+EV value bets) |
 | `format-predictions.js` | Builds prediction list + Telegram HTML report |
 | `telegram-notify.js` | Sends messages to Telegram (Bot API, zero-dep) |
 | `server.js` | Health-check HTTP server for Render |
@@ -54,7 +54,8 @@ npm install
 # One-off: capture + print predictions + slate analysis
 node intercept-scheduled-virtuals.js   # Ctrl+C after a few minutes
 node predict.js
-node predict.js backtest               # calibration on resolved matches
+node predict.js ev                      # +EV value bets (learned calibration)
+node predict.js backtest               # calibration + LOOCV EV profitability
 
 # Bot loop (capture → predict → Telegram every 5 min)
 cp .env.example .env                   # fill in TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID

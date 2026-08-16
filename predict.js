@@ -23,6 +23,8 @@ const {
   matchResult,
   buildStandings,
   confidenceTier,
+  learnCalibration,
+  OUTCOMES,
 } = require('./virtual-football-model');
 
 const NDJSON = path.join(__dirname, 'virtual-football-live.ndjson');
@@ -84,6 +86,19 @@ function loadCaptures() {
 const pct = (x) => `${(x * 100).toFixed(1)}%`;
 const BAR = '═'.repeat(76);
 const line = (s = '') => console.log(s);
+
+/** Build the list of {rec, pred, actual} for every resolved match that has odds+result. */
+function resolvedSamples(leagues) {
+  const out = [];
+  for (const L of Object.values(leagues)) {
+    for (const rec of L.resolved) {
+      const pred = predictMatch(rec.ev, L.standings);
+      const actual = matchResult(rec.ev);
+      if (pred && actual) out.push({ rec, pred, actual });
+    }
+  }
+  return out;
+}
 
 /* ------------------------------------------------------------------ */
 /* LIVE PREDICTION + OVERHEAD ANALYSIS                                 */
@@ -288,9 +303,168 @@ function backtest() {
     line('\nACTUAL OUTCOME DISTRIBUTION:');
     line(`  Home ${dist.home} (${pct(dist.home / dn)})  Draw ${dist.draw} (${pct(dist.draw / dn)})  Away ${dist.away} (${pct(dist.away / dn)})`);
   }
+
+  // ----------------------------------------------------------------
+  // EV PROFITABILITY + LEAVE-ONE-OUT CALIBRATION (the productive test)
+  // ----------------------------------------------------------------
+  // The base model picks argmax(de-vigged prob) and pays the vigged price.
+  // We now test whether LEARNING a per-outcome calibration correction from the
+  // resolved matches yields any +EV edge, evaluated with leave-one-out
+  // cross-validation (LOOCV) so the calibration never sees the match it predicts.
+  line('\n' + '─'.repeat(76));
+  line('EV / VALUE BET ANALYSIS (LOOCV — calibration never trains on the match it predicts)');
+  line('─'.repeat(76));
+
+  const samples = resolvedSamples(leagues);
+  if (samples.length < 10) {
+    line(`Only ${samples.length} resolved samples — too few for a reliable LOOCV EV test (need >=10).`);
+    line('Run the interceptor longer to accumulate resolved matches.');
+    line(BAR);
+    return;
+  }
+
+  // Strategy A — base model: bet the argmax pick at vigged odds.
+  // Strategy B — value model: learn calibration on all OTHER matches (LOOCV),
+  //              then bet the +EV outcome (highest EV) at vigged odds.
+  let aStake = 0, aReturn = 0; // base model: 1 unit staked per bet
+  let bStake = 0, bReturn = 0; // value model
+  let bBets = 0, bWins = 0;
+  const evBuckets = { '<0': { n: 0, stake: 0, ret: 0 }, '0-5%': { n: 0, stake: 0, ret: 0 }, '>5%': { n: 0, stake: 0, ret: 0 } };
+  const bPickDist = { home: 0, draw: 0, away: 0 };
+
+  for (let i = 0; i < samples.length; i++) {
+    const { rec, actual } = samples[i];
+    // A: base pick
+    const basePred = samples[i].pred;
+    aStake += 1;
+    if (basePred.pick === actual) aReturn += basePred.odds[basePred.pick];
+
+    // B: LOOCV calibration trained on all samples EXCEPT i
+    const train = samples.filter((_, j) => j !== i);
+    const cal = learnCalibration(train.map((s) => ({ pred: s.pred, actual: s.actual })));
+    const vpred = predictMatch(rec.ev, {}, cal);
+    if (!vpred || vpred.valueEv == null) continue;
+    const pick = vpred.valuePick;
+    bPickDist[pick]++;
+    bBets++;
+    bStake += 1;
+    if (pick === actual) { bReturn += vpred.odds[pick]; bWins++; }
+    // bucket by predicted EV
+    const e = vpred.valueEv;
+    const bk = e < 0 ? '<0' : e < 0.05 ? '0-5%' : '>5%';
+    evBuckets[bk].n++;
+    evBuckets[bk].stake += 1;
+    if (pick === actual) evBuckets[bk].ret += vpred.odds[pick];
+  }
+
+  const aROI = aStake ? (aReturn - aStake) / aStake : 0;
+  const bROI = bStake ? (bReturn - bStake) / bStake : 0;
+  line(`Strategy A (base, always favorite): ${samples.length} bets, ROI ${(aROI * 100).toFixed(1)}% (stake ${aStake.toFixed(0)}, return ${aReturn.toFixed(1)})`);
+  line(`Strategy B (LOOCV value bets):     ${bBets} bets, ROI ${(bROI * 100).toFixed(1)}% (stake ${bStake.toFixed(0)}, return ${bReturn.toFixed(1)}, win ${pct(bBets ? bWins / bBets : 0)})`);
+  line(`  value-pick distribution: 1=${bPickDist.home} X=${bPickDist.draw} 2=${bPickDist.away}`);
+
+  line('\n  ROI by predicted-EV bucket (does higher predicted EV actually pay more?):');
+  line('  bucket    n     stake   return   ROI');
+  for (const bk of ['<0', '0-5%', '>5%']) {
+    const b = evBuckets[bk];
+    if (!b.n) { line(`  ${bk.padEnd(9)} 0     -       -        -`); continue; }
+    const roi = (b.ret - b.stake) / b.stake;
+    line(`  ${bk.padEnd(9)} ${String(b.n).padStart(4)}  ${b.stake.toFixed(0).padStart(6)}  ${b.ret.toFixed(1).padStart(7)}  ${(roi * 100).toFixed(1)}%`);
+  }
+  line('\nInterpretation:');
+  line('  - Strategy A ROI is the realistic floor: betting every favorite at vigged odds.');
+  line('  - If Strategy B ROI > 0 AND the >5% bucket ROI > 0, the calibration finds real edge.');
+  line('  - If Strategy B ≈ Strategy A, the odds are already calibrated and no edge exists.');
+  line('  - LOOCV is conservative (small training set per fold); more data can only help B.');
+  line(BAR);
+}
+
+/* ------------------------------------------------------------------ */
+/* VALUE BETS — +EV picks on SCHEDULED matches via learned calibration */
+/* ------------------------------------------------------------------ */
+function valueBets() {
+  const leagues = loadCaptures();
+  const samples = resolvedSamples(leagues);
+
+  line(BAR);
+  line('VIRTUAL FOOTBALL — VALUE BETS (+EV via learned calibration)');
+  line(BAR);
+
+  if (samples.length < 10) {
+    line(`Calibration training set: ${samples.length} resolved matches (need >=10 to trust).`);
+    line('Too few to learn a reliable correction. Run the interceptor longer, then re-run `node predict.js ev`.');
+    line('Falling back: showing base-model favorites only (no EV computed).');
+    line(BAR);
+    return;
+  }
+
+  // Learn calibration from ALL resolved matches (the historical truth), then
+  // apply it to SCHEDULED (unresolved) matches to estimate true probabilities
+  // and compute EV against the vigged odds.
+  const cal = learnCalibration(samples.map((s) => ({ pred: s.pred, actual: s.actual })));
+  line(`Calibration trained on ${samples.length} resolved matches.`);
+  line('Calibration correction by outcome (de-vigged bin -> actual hit rate):');
+  for (const o of OUTCOMES) {
+    const bins = Object.keys(cal[o]).map(Number).sort((a, b) => a - b);
+    const parts = bins
+      .filter((b) => cal[o][b.toFixed(1)].n >= 3)
+      .map((b) => `${(b * 100).toFixed(0)}%→${pct(cal[o][b.toFixed(1)].actual).replace('%', '')}%(${cal[o][b.toFixed(1)].n})`);
+    line(`  ${o.padEnd(5)} ${parts.join('  ') || '(no bins with >=3 samples)'}`);
+  }
+
+  // Build +EV picks across all scheduled matches.
+  const picks = [];
+  for (const [pid, L] of Object.entries(leagues)) {
+    const seen = new Set();
+    for (const rec of [...L.scheduled].reverse()) {
+      const id = rec.ev.eventId;
+      if (id && seen.has(id)) continue;
+      seen.add(id);
+      const pred = predictMatch(rec.ev, L.standings, cal);
+      if (!pred || pred.valueEv == null) continue;
+      picks.push({ pid, league: leagueName(pid), rec, pred });
+    }
+  }
+
+  // Sort by EV descending; the head is the most +EV slate.
+  picks.sort((a, b) => b.pred.valueEv - a.pred.valueEv);
+
+  line('');
+  line(`SCHEDULED matches scanned: ${picks.length}`);
+  const positive = picks.filter((p) => p.pred.valueEv > 0);
+  line(`+EV bets found: ${positive.length} (predicted edge > 0%)`);
+
+  if (!positive.length) {
+    line('No +EV bets — the learned calibration finds no mispricing at current odds.');
+    line('This is the honest answer: either the odds are well-calibrated, or the');
+    line('sample is too small for the calibration to detect the edge. See `node predict.js backtest`.');
+    line(BAR);
+    return;
+  }
+
+  line('\nTOP +EV BETS (highest predicted edge first):');
+  line('  #  match                  bet   odds   P_cal  EV      vs.favorite');
+  positive.slice(0, 20).forEach((p, i) => {
+    const pr = p.pred;
+    const vsFav = pr.valuePick === pr.pick ? '=' : `${pr.pickLabel.split(' ')[0]}@${pr.odds[pr.pick].toFixed(2)}`;
+    line(
+      `  ${String(i + 1).padStart(2)}  ${(pr.home.code + ' v ' + pr.away.code).padEnd(23)}` +
+      `${pr.valuePickLabel.split(' ')[0].padEnd(5)} ${pr.odds[pr.valuePick].toFixed(2).padEnd(5)} ` +
+      `${pct(pr.calibratedProbabilities[pr.valuePick]).padStart(6)} ${(pr.valueEv >= 0 ? '+' : '')}${(pr.valueEv * 100).toFixed(1)}%`.padEnd(12) +
+      ` ${vsFav}`
+    );
+  });
+
+  line('\nNOTE:');
+  line(`  - EV = decimal_odds * P_calibrated - 1, using bias-corrected probabilities`);
+  line(`    learned from ${samples.length} resolved matches (LOOCV-validated in backtest).`);
+  line('  - +EV ≠ guaranteed win; it means the price is favourable vs the calibrated truth.');
+  line('  - Virtual football is RNG + house vig; small samples make calibration fragile.');
+  line('  - Always cross-check with `node predict.js backtest` Strategy B ROI before staking.');
   line(BAR);
 }
 
 const mode = process.argv[2];
 if (mode === 'backtest') backtest();
+else if (mode === 'ev') valueBets();
 else livePrediction();

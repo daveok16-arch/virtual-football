@@ -8,6 +8,7 @@
     "start": "node bot-runner.js",
     "bot": "node bot-runner.js",
     "predict": "node predict.js",
+    "ev": "node predict.js ev",
     "backtest": "node predict.js backtest"
   },
   "dependencies": {

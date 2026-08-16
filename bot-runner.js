@@ -20,7 +20,7 @@
  */
 const { start: startServer, setState } = require('./server');
 const { captureFootball } = require('./capture');
-const { buildPredictions, composeReport, slateMeta } = require('./format-predictions');
+const { buildPredictions, composeReport, composeValuePicks, slateMeta } = require('./format-predictions');
 const { notify } = require('./telegram-notify');
 
 const INTERVAL = (Number(process.env.RUN_INTERVAL_SECONDS) || 300) * 1000;
@@ -49,13 +49,19 @@ async function runOnce() {
     const allPicks = buildPredictions(leagues);
     const meta = { capturedAt, ...slateMeta(allPicks) };
     const report = composeReport(allPicks, meta);
+    const valueMsg = composeValuePicks(allPicks, meta);
 
     const nLeagues = Object.keys(leagues).length;
-    const summary = `${allPicks.length} matches across ${nLeagues} leagues`;
+    const nValue = allPicks.filter((p) => p.pred.valueEv != null && p.pred.valueEv > 0).length;
+    const summary = `${allPicks.length} matches across ${nLeagues} leagues, ${nValue} +EV`;
     console.log(`[bot] captured ${summary}`);
-    console.log('\n' + report.replace(/<[^>]+>/g, '') + '\n');
+    // Combine report + value bets into a single notify() call so the auto-delete
+    // logic (which clears the previous batch at the start of each notify) treats
+    // them as one notification batch, not two separate ones.
+    const fullReport = valueMsg ? report + '\n\n' + valueMsg : report;
+    console.log('\n' + fullReport.replace(/<[^>]+>/g, '') + '\n');
 
-    const tgOk = await notify(report);
+    const tgOk = await notify(fullReport);
     if (!tgOk) console.log('[bot] (Telegram not configured or failed — report printed above)');
 
     setState({

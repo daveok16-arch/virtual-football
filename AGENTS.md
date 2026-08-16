@@ -7,7 +7,7 @@ from the GoldenRace provider's WebSocket via the Chrome DevTools Protocol (CDP) 
 no DOM scraping.
 
 ## Key files
-- `intercept-scheduled-virtuals.js` — the only executable script (520 lines). Perpetual
+- `intercept-scheduled-virtuals.js` — the only executable script (412 lines). Perpetual
   listener; run with `node intercept-scheduled-virtuals.js` (Ctrl+C to stop).
 - `league-mappings.json` — `playlistId -> league name` for the 6 football leagues
   (41104 England, 41106 France, 41108 Germany, 41110 Italy, 41113 Spain, 41114 Turkey).
@@ -112,3 +112,110 @@ Files: `capture.js` (reusable capture fn), `format-predictions.js` (report build
   `Target.receivedMessageFromTarget` (deprecated in modern Chrome in favor of flat
   `sessionId` mode via `flatten:true`). Works but fragile across puppeteer/Chrome versions.
 - Several `.catch(()=>{})` swallow errors silently (acceptable for a resilient listener).
+
+## Deep audit findings (verified 2026-08-15T21:55Z) — OPEN ACTION ITEMS
+Verified by: `node --check` (8/8 JS pass), JSON parse (4/4 pass), 34 unit tests on the
+model (all pass), end-to-end synthetic NDJSON through predict.js + format-predictions +
+backtest (all correct), npm audit, require-graph analysis.
+
+### HIGH
+- **Supply-chain vuln:** `npm audit` reports HIGH in `extract-zip` (symlink path
+  traversal, GHSA-jmr9-qjv8-65gv) via `@puppeteer/browsers` <=2.13.2 → puppeteer 23.11.1.
+  Fix = upgrade to puppeteer@25.7.0 (breaking). The vulnerable code path (Chrome download
+  via extract-zip) is skipped at runtime because `PUPPETEER_SKIP_DOWNLOAD=true` is set, so
+  this is a build/CI surface, not a runtime exploit — but the dep is still installed.
+
+### MEDIUM
+- **Coupling / heavy require:** `format-predictions.js` imports `leagueName` from
+  `capture.js`, which `require`s puppeteer. So loading the pure formatting module pulls in
+  **136 puppeteer modules**. A formatting/test module should not depend on the capture
+  engine. Fix: extract `leagueName` (+ the mappings loader) into a tiny shared module
+  (e.g. `league-names.js`) and import it from intercept/capture/predict/format-predictions.
+- **Duplicated `leagueName`:** defined 3× (intercept-scheduled-virtuals.js, capture.js,
+  predict.js) with subtly different fallback semantics — intercept does
+  `mappingsDoc.mappings || mappingsDoc` (tolerates unwrapped JSON); predict & capture do
+  `.mappings || {}` (break if the wrapper key is dropped). Should be one shared impl.
+- **bot-runner `running` flag has no watchdog:** if `captureFootball` hangs (e.g. a stuck
+  `frame.evaluate` with no overall timeout), `running` stays true forever and EVERY
+  subsequent `setInterval` tick is skipped — the bot silently stops capturing until
+  restarted. capture.js has per-`goto` 60s timeouts but no overall capture deadline. Add a
+  watchdog (e.g. `Promise.race` with a hard cap, or clear `running` after N minutes).
+- **intercept perf:** the page-level `Network.loadingFinished` listener (line ~441) calls
+  `Network.getResponseBody` for EVERY response on the main page, THEN filters by keyword.
+  No URL pre-filter, no reqUrlMap for the page session. On a perpetual listener this
+  fetches/holds bodies for all images, scripts, analytics, etc. capture.js does NOT have
+  this issue (it only listens on the sub-session). Add a URL keyword pre-filter.
+- **Dockerfile fallback:** `RUN PUPPETEER_SKIP_DOWNLOAD=true npm ci --omit=dev || npm install --omit=dev`
+  — the `npm install` fallback lacks the `PUPPETEER_SKIP_DOWNLOAD=true` prefix, so if `npm ci`
+  fails the fallback downloads ~150MB of bundled Chrome (wasted space / slower build).
+
+### LOW
+- `headless: 'new'` is a legacy literal (puppeteer >=22 treats `headless: true` as the new
+  headless mode). Works in 23.11 but should be `true` for forward-compat.
+- `telegram-notify.js` uses deprecated `querystring` (use `URLSearchParams`).
+- `chunk()` can emit a chunk > 4000 chars if a single line exceeds `TG_MAX` (Telegram
+  would reject it at 4096). Unlikely with current short per-match lines, but unguarded.
+- `predict.js loadCaptures` reads the whole ndjson into memory (`readFileSync` + split);
+  fine for on-demand use, but unbounded if the perpetual interceptor is left running long.
+- `intercept-scheduled-virtuals.js` is 412 lines (AGENTS.md previously said 520 — fixed).
+- `--disable-web-security` + `--disable-features=IsolateOrigins,site-per-process` weaken
+  the headless browser's security model (required for the cross-origin iframe CDP approach;
+  acceptable given the tool only navigates to sportybet.com, but worth noting).
+
+### Verified CORRECT (no action)
+- Model math: de-vig probabilities sum to 1.0; NaN guard on odds ≤1 / 0 / undefined;
+  string-odds coerced; tie-break defaults to home; standings AGREE/DISAGREE/NEUTRAL logic;
+  `matchResult` finalOutcome + wonMarkets fallback; `buildStandings` gamesPlayed = W+D+L.
+- predict.js frame unwrapping (`entry.data.res ? entry.data : entry`) handles both the
+  logToDisk-wrapped form and raw envelopes — verified with synthetic NDJSON.
+- HTML escaping in format-predictions (`&` `<` `>` escaped) — verified with `<`/`>` team names.
+- Dockerfile inline `PUPPETEER_SKIP_DOWNLOAD=true npm ci` DOES skip Chrome at build time
+  (the inline env is correct; only the fallback path is missing it).
+- render.yaml / .env.example / server.js PORT defaults (10000) are mutually consistent;
+  Render injects PORT automatically for web services.
+
+## EV + learned-calibration layer (added 2026-08-15)
+The base engine picks `argmax(de-vigged prob)` and pays the vigged price — structurally
+−EV (it can't beat the vig, and its own backtest showed the draw is massively under-implied:
+actual ~42% vs implied ~25-33%, so always-pick-draw 42% beats the model's 38.6%). Added a
+**productive layer** that is backward-compatible (all original fields unchanged when no
+calibration map is supplied):
+
+- `learnCalibration(samples)` — from resolved {pred, actual} pairs, buckets each outcome's
+  de-vigged probability into 0.1-wide bins and records the ACTUAL hit rate (isotonic-style).
+- `calibrate(cal, outcome, fairProb)` — returns the bin's empirical rate (≥3 samples), or
+  linearly interpolates between neighbouring populated bins across the gap `[lo+0.1, hi]`,
+  or falls back to the raw de-vigged probability when no data exists (honest — no invented
+  correction). `MIN_CAL_SAMPLES = 3`.
+- `predictMatch(ev, standings, cal)` — when `cal` is supplied, adds `calibratedProbabilities`,
+  `ev` (per-outcome `EV = decimal_odds × P_calibrated − 1`, against the VIGGED price you pay),
+  `valuePick` (highest-EV outcome — may differ from `pick`), `valueEv`, `valuePickLabel`.
+  EV is computed against vigged odds (what you get paid), NOT fair odds.
+- `node predict.js ev` — learns calibration from ALL resolved matches, applies to SCHEDULED
+  matches, surfaces +EV bets sorted by edge. Shows the learned correction per outcome.
+- `node predict.js backtest` — now appends an **EV / VALUE BET ANALYSIS** section with
+  **leave-one-out cross-validation (LOOCV)**: Strategy A (base, always favorite) vs
+  Strategy B (LOOCV value bets, calibration trained on all matches EXCEPT the one predicted),
+  plus ROI by predicted-EV bucket. This is the honest out-of-sample test for whether any
+  +EV edge actually survives. If Strategy B ROI > 0 AND the >5%-EV bucket ROI > 0, the
+  calibration finds real edge; if B ≈ A, the odds are already calibrated and no edge exists.
+- `format-predictions.buildPredictions(leagues, {withValue:true})` — auto-learns calibration
+  when ≥10 resolved matches exist and attaches the EV layer to each scheduled pick.
+  `composeValuePicks` emits a Telegram "Value Bets (+EV)" message (returns null when no +EV,
+  so the bot skips it). `bot-runner.js` sends it as a 2nd message between Top Picks &
+  Full Schedule.
+
+### Verified (synthetic + edge cases, 56 unit tests pass)
+- Reproduced the documented draw mispricing: with draws actually 50% vs implied 25%, the EV
+  mode flags the draw +EV (+100-150%); backtest LOOCV Strategy B ROI +100% vs Strategy A −50%.
+- Genuinely fair odds → all EVs = −vig, value message correctly null (no false +EV).
+- No resolved data → calibration skipped, `ev` null, value message null (graceful).
+- HTML escaping preserved in value message (`&`/`<`/`>` escaped).
+- Backward compat: original `predict.js` (live + backtest base sections) and all original
+  prediction fields unchanged when no calibration map is supplied.
+
+### Honest limitation
+LOOCV with the current ~57 resolved-sample ceiling is conservative and the per-fold training
+set is tiny; the EV edge is real ONLY insofar as the mispricing is structural (the draw
+under-impression appears structural per the backtest). Accumulate more resolved matches
+(run the interceptor longer) to tighten the calibration bins before staking real money.

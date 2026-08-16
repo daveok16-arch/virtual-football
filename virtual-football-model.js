@@ -56,6 +56,100 @@ function fairProbabilities(odds) {
   };
 }
 
+/**
+ * EMPIRICAL CALIBRATION — corrects the de-vigged odds' systematic bias.
+ *
+ * The base model ASSUMES de-vigged odds = true probability. The backtest proves
+ * this is FALSE per-outcome: the draw is massively under-implied (actual ~42%
+ * vs implied ~25-33%), while favorites (home) over-actual their implied rate at
+ * low confidence. We learn a per-outcome calibration map from resolved matches:
+ * bucket the de-vigged probability into 0.1-wide bins per outcome, and record
+ * the ACTUAL hit rate. At predict time we look up (or interpolate) the bin to
+ * get a bias-corrected probability estimate. This is a isotonic-style smoother.
+ *
+ * Calibration map shape:
+ *   { home: { "0.5": {n, hits, actual} }, draw: {...}, away: {...} }
+ *
+ * If a bin has no data we fall back to the raw de-vigged probability (honest:
+ * we do not invent correction where we have no evidence).
+ */
+
+/** Bin a probability into a 0.1-wide bucket key ("0.0".."0.9"). */
+function probBin(p) {
+  const b = Math.max(0, Math.min(0.9, Math.floor(p * 10) / 10));
+  // toFixed avoids float keys like 0.30000000000000004
+  return b.toFixed(1);
+}
+
+/**
+ * Learn a calibration map from an iterable of {pred, actual} pairs, where pred
+ * is a predictMatch() result (with fairProbabilities + pick) and actual is the
+ * resolved outcome ('home'|'draw'|'away'). Records, per outcome, how often each
+ * de-vigged-probability bin actually occurred.
+ */
+function learnCalibration(samples) {
+  const cal = { home: {}, draw: {}, away: {} };
+  for (const { pred, actual } of samples) {
+    if (!pred || !pred.fairProbabilities || !actual) continue;
+    for (const o of OUTCOMES) {
+      const p = pred.fairProbabilities[o];
+      if (p == null || Number.isNaN(p)) continue;
+      const key = probBin(p);
+      const slot = (cal[o][key] = cal[o][key] || { n: 0, hits: 0 });
+      slot.n++;
+      if (actual === o) slot.hits++;
+    }
+  }
+  for (const o of OUTCOMES) {
+    for (const key of Object.keys(cal[o])) {
+      const s = cal[o][key];
+      s.actual = s.n ? s.hits / s.n : null;
+    }
+  }
+  return cal;
+}
+
+/**
+ * Look up the calibrated (bias-corrected) probability for an outcome given its
+ * de-vigged probability. Uses the bin's empirical hit rate; interpolates linearly
+ * between populated neighbouring bins when the exact bin is empty; falls back to
+ * the raw de-vigged probability if no calibration data exists at all.
+ */
+function calibrate(cal, outcome, fairProb) {
+  const bins = cal && cal[outcome];
+  if (!bins) return fairProb; // no calibration data — honest fallback
+  const key = probBin(fairProb);
+  const slot = bins[key];
+  if (slot && slot.n >= MIN_CAL_SAMPLES) return slot.actual; // enough data in-bin
+
+  // Interpolate between nearest populated bins on either side of fairProb.
+  // Bin "0.3" covers [0.3,0.4); its upper edge is 0.4 = lo+0.1. Bin "0.6" covers
+  // [0.6,0.7); its lower edge is 0.6 = hi. The gap between them is [lo+0.1, hi];
+  // we linearly interpolate across that gap (clamped to [0,1]).
+  const populated = Object.keys(bins)
+    .map(Number)
+    .filter((b) => bins[b.toFixed(1)].n >= MIN_CAL_SAMPLES)
+    .sort((a, b) => a - b);
+  if (!populated.length) return fairProb;
+  let lo = null, hi = null;
+  for (const b of populated) {
+    if (b + 0.1 <= fairProb) lo = b;
+    if (b >= fairProb && hi == null) hi = b;
+  }
+  if (lo != null && hi != null && lo !== hi) {
+    const loA = bins[lo.toFixed(1)].actual;
+    const hiA = bins[hi.toFixed(1)].actual;
+    const span = hi - (lo + 0.1);
+    const t = span > 0 ? (fairProb - (lo + 0.1)) / span : 0;
+    return loA + (hiA - loA) * Math.max(0, Math.min(1, t));
+  }
+  const single = lo != null ? lo : hi;
+  return bins[single.toFixed(1)].actual;
+}
+
+/** Minimum resolved samples in a bin before we trust its empirical rate. */
+const MIN_CAL_SAMPLES = 3;
+
 const CONFIDENCE_TIERS = [
   { label: 'HIGH', min: 0.55 },
   { label: 'MEDIUM', min: 0.4 },
@@ -73,9 +167,12 @@ const OUTCOMES = ['home', 'draw', 'away'];
  *
  * @param {object} ev        a football event block: ev.data.participants, ev.data.oddValues
  * @param {object} standings optional standings map: { fifaCode -> {points, win, draw, lost, gamesPlayed, ...} }
+ * @param {object} [cal]     optional learned calibration map (see learnCalibration). When
+ *                           supplied, calibratedProbabilities + per-outcome EV are computed;
+ *                           the `valuePick` is the +EV outcome (may differ from `pick`).
  * @returns {object} prediction
  */
-function predictMatch(ev, standings = {}) {
+function predictMatch(ev, standings = {}, cal = null) {
   const data = ev.data || {};
   const parts = data.participants || [];
   const odds = (data.oddValues || []).slice(0, 3);
@@ -115,6 +212,27 @@ function predictMatch(ev, standings = {}) {
   }
   const adjustedConfidence = Math.max(0, Math.min(1, confidence + confidenceAdjust));
 
+  // --- empirical calibration + expected value (the productive layer) ---
+  // Calibrated probabilities are the bias-corrected true-prob estimates. EV is
+  // computed against the VIGGED decimal odds (what you actually get paid):
+  //   EV(outcome) = decimal_odds * P_calibrated(outcome) - 1.
+  // A +EV outcome is a productive bet EVEN if it is not the most likely outcome
+  // (e.g. a 42%-true draw at 4.0 pays +68% while a 55%-true favorite at 1.5 loses).
+  let calibratedProbabilities = null;
+  let evMap = null;
+  let valuePick = null;
+  let valueEv = null;
+  if (cal) {
+    calibratedProbabilities = {};
+    evMap = {};
+    for (const o of OUTCOMES) {
+      calibratedProbabilities[o] = calibrate(cal, o, probs[o]);
+      evMap[o] = Number(odds[OUTCOMES.indexOf(o)]) * calibratedProbabilities[o] - 1;
+    }
+    valuePick = OUTCOMES.reduce((best, o) => (evMap[o] > evMap[best] ? o : best), 'home');
+    valueEv = evMap[valuePick];
+  }
+
   return {
     home: { code: home.fifaCode || home.name, name: home.name, stars: home.stars },
     away: { code: away.fifaCode || away.name, name: away.name, stars: away.stars },
@@ -129,6 +247,12 @@ function predictMatch(ev, standings = {}) {
     standingsAgreement,
     ppgGap,
     margin: confidence - Math.max(...OUTCOMES.filter((o) => o !== pick).map((o) => probs[o])),
+    // EV layer (present only when a calibration map is supplied):
+    calibratedProbabilities,
+    ev: evMap,
+    valuePick,
+    valueEv,
+    valuePickLabel: valuePick && { home: '1 (Home)', draw: 'X (Draw)', away: '2 (Away)' }[valuePick],
   };
 }
 
@@ -185,6 +309,10 @@ module.exports = {
   predictMatch,
   matchResult,
   buildStandings,
+  learnCalibration,
+  calibrate,
+  probBin,
   CONFIDENCE_TIERS,
   OUTCOMES,
+  MIN_CAL_SAMPLES,
 };
