@@ -151,17 +151,49 @@ function composeReport(allPicks, meta = {}) {
 }
 
 /**
+ * Identify the eventIds that composeReport selects as its top picks (the
+ * highest-confidence match per league per week, HIGH/MEDIUM only). Used by
+ * composeValuePicks to exclude those matches so the two sections don't overlap.
+ */
+function topPickEventIds(allPicks) {
+  const ids = new Set();
+  const sections = groupByLeagueWeek(allPicks.filter((p) => p.pred.tier !== 'LOW'));
+  for (const sec of sections) {
+    for (const w of sec.weeks) {
+      if (w.picks[0]) ids.add(w.picks[0].rec.ev.eventId);
+    }
+  }
+  return ids;
+}
+
+/**
  * Compose the "Value Bets" message — +EV picks grouped by league → week,
- * mirroring the Top Picks layout. Shows the single best +EV pick per league
- * per week (highest edge), so the reader can locate bets by league/week just
- * like the top-picks report. Only emitted when the predictions carry the EV
- * layer (calibration was applied); returns null when there are no +EV bets.
+ * mirroring the Top Picks layout but covering DIFFERENT matches (the ones
+ * Top Picks did not already select). Shows the single best +EV pick per
+ * league per week from the remaining pool, sorted by EV descending.
+ *
+ * Only emitted when the predictions carry the EV layer (calibration applied);
+ * returns null when there are no +EV bets after excluding Top Picks matches.
  */
 function composeValuePicks(allPicks, meta = {}) {
-  const value = allPicks.filter((p) => p.pred.valueEv != null && p.pred.valueEv > 0);
+  const exclude = topPickEventIds(allPicks);
+  const value = allPicks.filter(
+    (p) =>
+      p.pred.valueEv != null &&
+      p.pred.valueEv > 0 &&
+      !exclude.has(p.rec.ev.eventId)
+  );
   if (!value.length) return null;
   const now = meta.capturedAt ? new Date(meta.capturedAt) : new Date();
   const lines = [];
+
+  // Summarise the calibration finding so the reader understands WHY value
+  // bets lean draw (or whatever the dominant +EV outcome is).
+  const pickCounts = { home: 0, draw: 0, away: 0 };
+  for (const p of value) pickCounts[p.pred.valuePick]++;
+  const dominant = Object.entries(pickCounts).sort((a, b) => b[1] - a[1])[0][0];
+  const domSym = { home: '1', draw: 'X', away: '2' }[dominant];
+
   lines.push('💰 <b>Value Bets (+EV)</b>');
   lines.push(esc(now.toUTCString().slice(0, 22)));
   lines.push('━'.repeat(20));
@@ -186,7 +218,11 @@ function composeValuePicks(allPicks, meta = {}) {
   }
 
   lines.push('');
-  lines.push(`<i>${value.length} +EV bets · EV = odds × calibrated P − 1 · UTC</i>`);
+  lines.push(
+    `<i>${value.length} +EV bets (excl. Top Picks) · ` +
+      `dominant: ${domSym} (${pickCounts[dominant]}/${value.length}) · ` +
+      `EV = odds × calibrated P − 1 · UTC</i>`
+  );
   return lines.join('\n');
 }
 
