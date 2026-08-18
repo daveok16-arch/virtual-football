@@ -13,6 +13,19 @@ no DOM scraping.
   (41104 England, 41106 France, 41108 Germany, 41110 Italy, 41113 Spain, 41114 Turkey).
 - `live-weeks-snapshot.json` — point-in-time capture of current matchDay per league.
 - `virtual-football-live.ndjson` — runtime output log (gitignored).
+- `macro-logger.js` — standalone perpetual capture for macro-scale data collection.
+  Continuously logs resolved matches to `macro-stats.jsonl` (gitignored). Run with
+  `node macro-logger.js` in the background for hours to accumulate 500-1000+ matches.
+  Generates `macro-stats-summary.json` (rolling stats). Pre-loads existing event IDs
+  to avoid duplicates across restarts.
+- `edge-calculator.js` — edge-deficit module. Computes actual vs implied probability
+  per outcome, per league, per star-differential. Uses Wilson score CIs. Reads from
+  `macro-stats.jsonl`. Run with `npm run edge` for a standalone report.
+- `kelly.js` — fractional Kelly Criterion bankroll management. Quarter-Kelly (0.25×)
+  by default, capped at 5% per bet. Sizes bets based on calibrated probability ×
+  decimal odds. Negative Kelly = don't bet.
+- `calibration-store.js` — persists resolved matches (MAX_STORE=2000) for cross-run
+  calibration. Exports `calSamples()` (global) and `calSamplesByLeague()` (per-league).
 
 ## How it works (CDP sub-session)
 1. Launch headless Chrome with `--disable-web-security` + `--disable-features=IsolateOrigins,site-per-process`
@@ -67,8 +80,11 @@ AGREE/NEUTRAL/DISAGREE with the odds favorite, nudging adjusted confidence ±2�
 ```
 npm install
 node intercept-scheduled-virtuals.js   # capture (Ctrl+C when done)
+node macro-logger.js                   # macro-scale continuous capture (run for hours)
 node predict.js                         # predictions + overhead analysis
 node predict.js backtest                # calibration on resolved matches
+npm run edge                            # edge-deficit analysis report
+npm run bot                             # bot loop: capture → predict → Kelly → Telegram
 ```
 Note: resolved matches arrive mainly in the initial WS subscription burst; run the
 interceptor long enough (or re-trigger leagues) to accumulate a backtest sample.
@@ -194,6 +210,50 @@ Tested: sent `/eventBlocks/event/result` requests for SCHEDULED (future) eventTi
 The server does NOT return predetermined results for future matches via this endpoint.
 Results are only delivered after the match video is played. The pre-determination is
 server-internal and not exposed to the client until match time.
+
+### Timing analysis (verified 2026-08-15)
+- SCHEDULED→RESOLVED transition: exactly 922ms (zero variance across 10 events)
+- The result payload (finalOutcome) ONLY appears in frames where serverStatus=RESOLVED
+- Zero race conditions: no frame has the result while status is still SCHEDULED
+- All resolved events have eventTimes in the PAST (164-284s ago)
+- Market closes ~263s before the result arrives → no sniping window
+- Zero SportyBet bet API calls observed → bet validation is server-side
+- **Conclusion: a network sniping bot is NOT structurally possible**
+
+## Macro-Market Statistical Strategy
+
+Since timing exploits are impossible (server-side validation, 263s market close lead),
+the only viable edge is pricing inefficiency. The strategy:
+
+### Data collection (macro-logger.js)
+`node macro-logger.js` — standalone perpetual capture that continuously records
+resolved matches to `macro-stats.jsonl`. Run for hours to accumulate 500-1000+ matches.
+Each entry: eventId, playlistId, league, matchDay, eventTime, teams, stars, odds1x2,
+fairProbs, overround, finalOutcome, outcome, totalGoals, wonMarkets.
+
+### Edge-Deficit Calculator (edge-calculator.js)
+- De-vigged (fair) probabilities computed from 1X2 odds (already in the model)
+- Tracks actual vs implied rate per outcome over rolling window (default 200)
+- Wilson score confidence intervals for each edge estimate
+- Per-league + per-star-differential breakdown
+- The structural edge: draws are underpriced by ~22pp (actual 51% vs implied 29%)
+- Home favorites are overpriced by ~13pp (actual 33% vs implied 46%)
+
+### Kelly Criterion Bankroll Management (kelly.js)
+- Quarter-Kelly (0.25×) — sacrifices 25% of growth for ~50% less variance
+- Cap at 5% of bankroll per single bet
+- f* = (p × b − q) / b, where p=calibrated prob, b=decimal_odds−1, q=1−p
+- Negative Kelly = don't bet (no positive expected value after vig)
+- Min edge threshold: 3% EV to be included in the report
+- `BANKROLL` env var sets the bankroll for sizing (default 1000)
+
+### Bayesian Shrinkage in calibration
+The calibrate() function blends bin empirical rates with the raw de-vigged
+probability, weighted by sample count (PRIOR_STRENGTH=20):
+  calibrated = (n/(n+20)) × empirical + (20/(n+20)) × fairProb
+This prevents extreme extrapolation from small samples (e.g., a draw at 12.10
+odds with implied 8% shouldn't be calibrated to 50% just because the overall
+draw rate is 50%). As N grows to 500+, the shrinkage vanishes.
 
 ## Audit findings (verified 2026-08-15) — FIXED
 - `node --check` passes; syntax valid. JSON files parse and are mutually consistent

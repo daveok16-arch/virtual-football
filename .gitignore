@@ -20,3 +20,7 @@ virtual-football-live.ndjson
 .vscode/
 # Persisted calibration training data (accumulated resolved matches)
 calibration-data.json
+
+# Macro-scale statistical data (continuous capture by macro-logger.js)
+macro-stats.jsonl
+macro-stats-summary.json

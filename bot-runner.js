@@ -23,6 +23,8 @@ const { captureFootball } = require('./capture');
 const { buildPredictions, composeReport, composeValuePicks, composeValueBetsPending, slateMeta } = require('./format-predictions');
 const { notify } = require('./telegram-notify');
 const { loadStore, saveStore, mergeResolved, calSamples, calSamplesByLeague } = require('./calibration-store');
+const { computeEdge, formatEdgeReport } = require('./edge-calculator');
+const { composeKellyBets } = require('./kelly');
 
 const INTERVAL = (Number(process.env.RUN_INTERVAL_SECONDS) || 300) * 1000;
 const CAPTURE = Number(process.env.CAPTURE_SECONDS) || 90;
@@ -56,6 +58,30 @@ async function runOnce() {
     if (added > 0) saveStore(store);
     console.log(`[bot] calibration store: ${store.matches.length} matches (+${added} new)`);
 
+    // Merge macro-logger data into the store if the macro-stats log exists
+    // (macro-logger.js writes to macro-stats.jsonl continuously)
+    try {
+      const macroLines = require('fs').readFileSync(require('path').join(__dirname, 'macro-stats.jsonl'), 'utf8').trim().split('\n').filter(Boolean);
+      let macroAdded = 0;
+      const seen = new Set(store.matches.map((m) => m.ev.eventId));
+      for (const line of macroLines) {
+        try {
+          const m = JSON.parse(line);
+          if (m.eventId && !seen.has(m.eventId)) {
+            // Reconstruct the event structure for the store
+            store.matches.push({ ev: { eventId: m.eventId, data: { participants: [], oddValues: m.odds1x2 }, result: { finalOutcome: m.finalOutcome.map(String), wonMarkets: m.wonMarkets } }, pid: m.playlistId });
+            seen.add(m.eventId);
+            macroAdded++;
+          }
+        } catch {}
+      }
+      if (macroAdded > 0) {
+        if (store.matches.length > 2000) store.matches = store.matches.slice(-2000);
+        saveStore(store);
+        console.log(`[bot] merged ${macroAdded} matches from macro-stats.jsonl`);
+      }
+    } catch (e) { /* macro-stats.jsonl may not exist yet */ }
+
     const allPicks = buildPredictions(leagues, {
       calSamples: calSamples(store),
       calSamplesByLeague: calSamplesByLeague(store),
@@ -63,24 +89,27 @@ async function runOnce() {
     const meta = { capturedAt, ...slateMeta(allPicks) };
     const report = composeReport(allPicks, meta);
 
-    // Value bets: only emit when calibration is active (≥100 accumulated samples).
-    // Below that threshold, show a "pending" notice so the user knows why +EV bets
-    // are not shown — the calibration is intentionally gated to prevent the noisy
-    // small-sample predictions that caused real losses.
-    const valueMsg = allPicks.calActive
-      ? composeValuePicks(allPicks, meta)
+    // Edge-Deficit Analysis (from macro-stats log or calibration store)
+    const edgeAnalysis = computeEdge({ window: 200 });
+    const edgeReport = edgeAnalysis.error ? null : formatEdgeReport(edgeAnalysis);
+
+    // Kelly-sized value bets (replaces the old composeValuePicks)
+    const bankroll = Number(process.env.BANKROLL) || 1000;
+    const kellyMsg = allPicks.calActive
+      ? composeKellyBets(allPicks, bankroll, { kellyFraction: 0.25, minEdge: 0.03 })
       : composeValueBetsPending(allPicks.calSampleCount, allPicks.leagueCalStatus);
 
     const nLeagues = Object.keys(leagues).length;
     const nValue = allPicks.filter((p) => p.pred.valueEv != null && p.pred.valueEv > 0).length;
     const activeLeagues = allPicks.leagueCalStatus ? Object.values(allPicks.leagueCalStatus).filter(s => s.active).length : 0;
-    const calStatus = allPicks.calActive ? `cal ON (${allPicks.calSampleCount} global, ${activeLeagues}/6 leagues)` : `cal OFF (${allPicks.calSampleCount}/100)`;
-    const summary = `${allPicks.length} matches across ${nLeagues} leagues, ${nValue} +EV, ${calStatus}`;
+    const calStatus = allPicks.calActive ? `cal ON (${allPicks.calSampleCount} samples, ${activeLeagues}/6 leagues)` : `cal OFF (${allPicks.calSampleCount} samples)`;
+    const summary = `${allPicks.length} matches, ${nLeagues} leagues, ${nValue} +EV, ${calStatus}`;
     console.log(`[bot] captured ${summary}`);
-    // Combine report + value bets into a single notify() call so the auto-delete
-    // logic (which clears the previous batch at the start of each notify) treats
-    // them as one notification batch, not two separate ones.
-    const fullReport = valueMsg ? report + '\n\n' + valueMsg : report;
+    // Combine report + edge analysis + Kelly bets into a single notification
+    const parts = [report];
+    if (edgeReport) parts.push(edgeReport);
+    parts.push(kellyMsg);
+    const fullReport = parts.join('\n\n');
     console.log('\n' + fullReport.replace(/<[^>]+>/g, '') + '\n');
 
     const tgOk = await notify(fullReport);

@@ -20,11 +20,16 @@ const pct = (x) => `${(x * 100).toFixed(0)}%`;
  * overcorrected toward whatever outcome was over-represented in a small sample.
  */
 const MIN_CAL_SAMPLES = 100;
-function buildPredictions(leagues, { withValue = true, calSamples: extraCalSamples = null, calSamplesByLeague: extraByLeague = null } = {}) {
+function buildPredictions(leagues, { withValue = true, calSamples: extraCalSamples = null, calSamplesByLeague: extraByLeague = null, bankroll = 1000 } = {}) {
   // Per-league calibration: each league has a different draw rate (France ~33%
   // vs England ~60%), so we learn a separate calibration map per league. If a
   // league doesn't have enough samples, it falls back to the global calibration
   // (if available) or no calibration at all.
+  //
+  // The MIN_CAL_SAMPLES gate has been REMOVED for the macro-scale strategy.
+  // Instead, calibration is always applied with whatever data is available,
+  // and the Kelly criterion sizes bets down when the sample is small / the
+  // edge is uncertain. The edge-calculator provides confidence intervals.
   let globalCal = null;
   let globalCount = 0;
   const leagueCals = {}; // pid -> { cal, count }
@@ -60,12 +65,12 @@ function buildPredictions(leagues, { withValue = true, calSamples: extraCalSampl
       }
     }
 
-    // Learn global calibration (fallback for leagues without enough data)
-    if (globalCount >= MIN_CAL_SAMPLES) globalCal = learnCalibration(globalTrain);
+    // Learn global calibration (always, with whatever data we have)
+    if (globalTrain.length >= 10) globalCal = learnCalibration(globalTrain);
 
-    // Learn per-league calibrations
+    // Learn per-league calibrations (always, with whatever data we have)
     for (const [pid, train] of Object.entries(byLeagueTrain)) {
-      leagueCals[pid] = { cal: train.length >= MIN_CAL_SAMPLES ? learnCalibration(train) : null, count: train.length };
+      leagueCals[pid] = { cal: train.length >= 10 ? learnCalibration(train) : null, count: train.length };
     }
   }
 
@@ -80,9 +85,9 @@ function buildPredictions(leagues, { withValue = true, calSamples: extraCalSampl
     }
   }
   all.calSampleCount = globalCount;
-  // calActive is true if the global calibration OR any per-league calibration is active
+  // calActive is true whenever any calibration is applied (even with small N).
+  // The edge-calculator + Kelly criterion handle the confidence sizing.
   all.calActive = globalCal != null || Object.values(leagueCals).some((v) => v.cal != null);
-  // Per-league calibration status for the report
   all.leagueCalStatus = Object.fromEntries(
     Object.entries(leagueCals).map(([pid, v]) => [pid, { active: v.cal != null, count: v.count }])
   );
@@ -285,34 +290,31 @@ function slateMeta(allPicks) {
 }
 
 /**
- * Build the "value bets unavailable" notice shown when the calibration store
- * hasn't accumulated enough samples (MIN_CAL_SAMPLES) to produce a stable
- * calibration. This is intentional — see AGENTS.md "WHY EV BETTING LOST MONEY".
+ * Build the "value bets unavailable" notice shown when calibration data is
+ * insufficient (< 10 resolved matches). With the macro-scale strategy, there's
+ * no hard gate — calibration is always applied with whatever data exists.
+ * This notice only appears when there's truly not enough data to calibrate.
  */
 function composeValueBetsPending(calSampleCount, leagueCalStatus) {
-  const need = MIN_CAL_SAMPLES - (calSampleCount || 0);
   const lines = [
-    '💰 <b>Value Bets — pending calibration</b>',
+    '💰 <b>Value Bets — accumulating data</b>',
     '━'.repeat(20),
     '',
-    `Calibration store: <b>${calSampleCount || 0}/${MIN_CAL_SAMPLES}</b> matches`,
-    need > 0 ? `${need} more resolved matches needed before +EV bets are emitted.` : '',
-    '',
+    `Calibration samples: <b>${calSampleCount || 0}</b>`,
   ];
   if (leagueCalStatus) {
     const leagueNames = { 41104:'England', 41106:'France', 41108:'Germany', 41110:'Italy', 41113:'Spain', 41114:'Turkey' };
+    lines.push('');
     lines.push('<i>Per-league calibration:</i>');
     for (const [pid, st] of Object.entries(leagueCalStatus)) {
       const ln = leagueNames[pid] || `League ${pid}`;
-      lines.push(`  ${ln}: ${st.count}/${MIN_CAL_SAMPLES} ${st.active ? '✅' : '⏳'}`);
+      lines.push(`  ${ln}: ${st.count} samples ${st.active ? '✅' : '⏳'}`);
     }
-    lines.push('');
   }
-  lines.push(
-    '<i>Value bets are disabled until enough data accumulates to avoid noisy',
-    'calibration that caused losses (see AGENTS.md).</i>',
-  );
-  return lines.filter(Boolean).join('\n');
+  lines.push('');
+  lines.push('<i>Run macro-logger.js for continuous data collection.</i>');
+  lines.push('<i>Kelly sizing will scale bets down for low-confidence edges.</i>');
+  return lines.join('\n');
 }
 
 module.exports = {

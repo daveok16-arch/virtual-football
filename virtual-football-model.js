@@ -114,18 +114,25 @@ function learnCalibration(samples) {
  * de-vigged probability. Uses the bin's empirical hit rate; interpolates linearly
  * between populated neighbouring bins when the exact bin is empty; falls back to
  * the raw de-vigged probability if no calibration data exists at all.
+ *
+ * SHRINKAGE: bin empirical rates are blended with the overall outcome rate,
+ * weighted by the bin's sample count (Bayesian shrinkage). This prevents
+ * extreme extrapolation from small samples — e.g., a draw at 12.10 odds
+ * (implied 8%) shouldn't be calibrated to 50% just because the overall draw
+ * rate is 50%. With N=500+, the shrinkage vanishes and the empirical rate
+ * dominates. With N=57, the blend is ~50/50, pulling extreme values toward
+ * the raw de-vigged probability.
  */
 function calibrate(cal, outcome, fairProb) {
   const bins = cal && cal[outcome];
   if (!bins) return fairProb; // no calibration data — honest fallback
   const key = probBin(fairProb);
   const slot = bins[key];
-  if (slot && slot.n >= MIN_CAL_SAMPLES) return slot.actual; // enough data in-bin
+  if (slot && slot.n >= MIN_CAL_SAMPLES) {
+    return shrink(slot, fairProb, cal, outcome);
+  }
 
   // Interpolate between nearest populated bins on either side of fairProb.
-  // Bin "0.3" covers [0.3,0.4); its upper edge is 0.4 = lo+0.1. Bin "0.6" covers
-  // [0.6,0.7); its lower edge is 0.6 = hi. The gap between them is [lo+0.1, hi];
-  // we linearly interpolate across that gap (clamped to [0,1]).
   const populated = Object.keys(bins)
     .map(Number)
     .filter((b) => bins[b.toFixed(1)].n >= MIN_CAL_SAMPLES)
@@ -137,14 +144,29 @@ function calibrate(cal, outcome, fairProb) {
     if (b >= fairProb && hi == null) hi = b;
   }
   if (lo != null && hi != null && lo !== hi) {
-    const loA = bins[lo.toFixed(1)].actual;
-    const hiA = bins[hi.toFixed(1)].actual;
+    const loA = shrink(bins[lo.toFixed(1)], fairProb, cal, outcome);
+    const hiA = shrink(bins[hi.toFixed(1)], fairProb, cal, outcome);
     const span = hi - (lo + 0.1);
     const t = span > 0 ? (fairProb - (lo + 0.1)) / span : 0;
     return loA + (hiA - loA) * Math.max(0, Math.min(1, t));
   }
   const single = lo != null ? lo : hi;
-  return bins[single.toFixed(1)].actual;
+  return shrink(bins[single.toFixed(1)], fairProb, cal, outcome);
+}
+
+/**
+ * Bayesian shrinkage: blend the bin's empirical actual rate with the raw
+ * de-vigged probability. The weight on the empirical rate grows with the bin's
+ * sample count: w = n / (n + PRIOR_STRENGTH). With PRIOR_STRENGTH=20, a bin
+ * with 20 samples is 50% empirical / 50% prior; with 100+ samples it's ~83%+
+ * empirical. This prevents the calibration from assigning 50% draw probability
+ * to a match with 8% implied draw odds based on just a few samples.
+ */
+const PRIOR_STRENGTH = 20;
+function shrink(slot, fairProb, cal, outcome) {
+  if (!slot || !slot.n) return fairProb;
+  const w = slot.n / (slot.n + PRIOR_STRENGTH);
+  return w * slot.actual + (1 - w) * fairProb;
 }
 
 /** Minimum resolved samples in a bin before we trust its empirical rate. */

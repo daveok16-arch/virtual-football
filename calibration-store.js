@@ -20,7 +20,7 @@ const path = require('path');
 const { predictMatch, matchResult } = require('./virtual-football-model');
 
 const STORE_PATH = path.join(__dirname, 'calibration-data.json');
-const MAX_STORE = 300;
+const MAX_STORE = 2000; // Macro-scale: hold 500-1000+ matches for stable baseline
 
 function loadStore() {
   try {
