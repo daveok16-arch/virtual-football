@@ -76,4 +76,25 @@ function calSamples(store) {
   return samples;
 }
 
-module.exports = { loadStore, saveStore, mergeResolved, calSamples, STORE_PATH, MAX_STORE };
+/**
+ * Build per-league {pred, actual} samples. Each league has a different draw
+ * rate (France ~33% vs England ~60%), so a global calibration is suboptimal —
+ * per-league calibration produces a more accurate bias correction.
+ * Returns { pid -> [{pred, actual}] }.
+ */
+function calSamplesByLeague(store) {
+  const byLeague = {};
+  for (const m of store.matches) {
+    const pid = m.pid;
+    if (!pid) continue;
+    const pred = predictMatch(m.ev, {});
+    const actual = matchResult(m.ev);
+    if (pred && actual) {
+      if (!byLeague[pid]) byLeague[pid] = [];
+      byLeague[pid].push({ pred, actual });
+    }
+  }
+  return byLeague;
+}
+
+module.exports = { loadStore, saveStore, mergeResolved, calSamples, calSamplesByLeague, STORE_PATH, MAX_STORE };

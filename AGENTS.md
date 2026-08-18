@@ -155,6 +155,46 @@ was chasing SAMPLE NOISE, not a real engine bias:
 - Mean: 8.3%, Stdev: 1.4%, Range: 5.1%–9.2% — fairly uniform across matches
 - This is the house's guaranteed edge that must be overcome
 
+### Goal distribution (key exploitable edge)
+- Avg total goals: 1.4 (vs ~2.5 in real football)
+- 0 goals: 28%, 1 goal: 25%, 2 goals: 32%, 3 goals: 16%
+- **Under 2.5 goals: 84%** of matches (vs ~55% in real football)
+- This explains the high draw rate: low-scoring games end level
+- Index [12] in oddValues (avg odds 1.85 ≈ 54% implied) likely maps to Under 2.5
+  → if true, 84% actual vs 54% implied = massive +EV
+  → ROI +56% in sample (needs confirmation with larger N)
+
+### Per-league draw rate (cross-league analysis)
+Draw rate is NOT uniform — a global calibration is suboptimal:
+- England:  60% draws | draw ROI +229% | fav ROI -46%
+- Spain:    60% draws | draw ROI +110% | fav ROI -46%
+- Germany:  56% draws | draw ROI  +49% | fav ROI -65%
+- Italy:    50% draws | draw ROI +112% | fav ROI  -5%
+- Turkey:   44% draws | draw ROI  +51% | fav ROI -18%
+- France:   33% draws | draw ROI  -2%  | fav ROI +18%  ← draw edge disappears!
+
+France behaves like real football (33% draws); England/Spain are draw-heavy.
+The calibration MUST be per-league, not global.
+
+### Star differential as predictor
+- Even stars (0 diff): 63% draw rate (n=19) → strong draw signal
+- Small gap (0.5–1.5): 75% draw rate (n=4) → small sample, uncertain
+- Large gap (2+): 41% draw rate (n=34) → draws less likely but still high
+- Star-odds correlation: 0.726 (stars correctly track odds)
+
+### Market structure (371 markets per match, 450 oddValues)
+The `wonMarkets` field reveals all market names: Match_Result (Home/Draw/Away),
+Double_Chance (Home_Draw/Home_Away/Draw_Away), Over/Under (0.5/1.5/2.5/3.5/4.5),
+Correct_Score, Handicap, Total_Goals, GoalGoal_NoGoal, HT markets, Clean_Sheet,
+Multigoal, etc. The flat `oddValues` array maps to these via a runtime `_clData.oddMap`
+(created client-side, not in the raw WS frame).
+
+### Can future results be queried? (NO)
+Tested: sent `/eventBlocks/event/result` requests for SCHEDULED (future) eventTimes.
+The server does NOT return predetermined results for future matches via this endpoint.
+Results are only delivered after the match video is played. The pre-determination is
+server-internal and not exposed to the client until match time.
+
 ## Audit findings (verified 2026-08-15) — FIXED
 - `node --check` passes; syntax valid. JSON files parse and are mutually consistent
   (same 6 playlist IDs, names match across both files). mappings load correctly at runtime.

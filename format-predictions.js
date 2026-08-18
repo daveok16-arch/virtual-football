@@ -20,38 +20,72 @@ const pct = (x) => `${(x * 100).toFixed(0)}%`;
  * overcorrected toward whatever outcome was over-represented in a small sample.
  */
 const MIN_CAL_SAMPLES = 100;
-function buildPredictions(leagues, { withValue = true, calSamples: extraCalSamples = null } = {}) {
-  let cal = null;
-  let calSampleCount = 0;
+function buildPredictions(leagues, { withValue = true, calSamples: extraCalSamples = null, calSamplesByLeague: extraByLeague = null } = {}) {
+  // Per-league calibration: each league has a different draw rate (France ~33%
+  // vs England ~60%), so we learn a separate calibration map per league. If a
+  // league doesn't have enough samples, it falls back to the global calibration
+  // (if available) or no calibration at all.
+  let globalCal = null;
+  let globalCount = 0;
+  const leagueCals = {}; // pid -> { cal, count }
+
   if (withValue) {
-    const train = [];
+    // Build global training set (current capture + store)
+    const globalTrain = [];
     for (const L of Object.values(leagues)) {
       for (const rec of L.resolved) {
         const pred = predictMatch(rec.ev, L.standings);
         const actual = matchResult(rec.ev);
-        if (pred && actual) train.push({ pred, actual });
+        if (pred && actual) globalTrain.push({ pred, actual });
       }
     }
-    // Merge accumulated samples from the calibration store (persists across
-    // bot runs) so the calibration reflects the true outcome distribution,
-    // not just the current capture's volatile 57-match sample.
-    if (extraCalSamples) train.push(...extraCalSamples);
-    calSampleCount = train.length;
-    // Gate: only calibrate with enough data. Below this, the calibration chases
-    // sample noise (see AGENTS.md "WHY EV BETTING LOST MONEY").
-    if (train.length >= MIN_CAL_SAMPLES) cal = learnCalibration(train);
+    if (extraCalSamples) globalTrain.push(...extraCalSamples);
+    globalCount = globalTrain.length;
+
+    // Build per-league training sets
+    const byLeagueTrain = {};
+    for (const [pid, L] of Object.entries(leagues)) {
+      byLeagueTrain[pid] = [];
+      for (const rec of L.resolved) {
+        const pred = predictMatch(rec.ev, L.standings);
+        const actual = matchResult(rec.ev);
+        if (pred && actual) byLeagueTrain[pid].push({ pred, actual });
+      }
+    }
+    // Merge accumulated per-league samples from the store
+    if (extraByLeague) {
+      for (const [pid, samples] of Object.entries(extraByLeague)) {
+        if (!byLeagueTrain[pid]) byLeagueTrain[pid] = [];
+        byLeagueTrain[pid].push(...samples);
+      }
+    }
+
+    // Learn global calibration (fallback for leagues without enough data)
+    if (globalCount >= MIN_CAL_SAMPLES) globalCal = learnCalibration(globalTrain);
+
+    // Learn per-league calibrations
+    for (const [pid, train] of Object.entries(byLeagueTrain)) {
+      leagueCals[pid] = { cal: train.length >= MIN_CAL_SAMPLES ? learnCalibration(train) : null, count: train.length };
+    }
   }
 
   const all = [];
   for (const [pid, L] of Object.entries(leagues)) {
     for (const rec of L.scheduled) {
-      const pred = predictMatch(rec.ev, L.standings, cal);
+      // Use per-league calibration if available, else global, else none
+      const leagueCal = leagueCals[pid]?.cal || globalCal;
+      const pred = predictMatch(rec.ev, L.standings, leagueCal);
       if (!pred) continue;
       all.push({ pid, league: leagueName(pid), rec, pred });
     }
   }
-  all.calSampleCount = calSampleCount;
-  all.calActive = cal != null;
+  all.calSampleCount = globalCount;
+  // calActive is true if the global calibration OR any per-league calibration is active
+  all.calActive = globalCal != null || Object.values(leagueCals).some((v) => v.cal != null);
+  // Per-league calibration status for the report
+  all.leagueCalStatus = Object.fromEntries(
+    Object.entries(leagueCals).map(([pid, v]) => [pid, { active: v.cal != null, count: v.count }])
+  );
   return all;
 }
 
@@ -255,18 +289,30 @@ function slateMeta(allPicks) {
  * hasn't accumulated enough samples (MIN_CAL_SAMPLES) to produce a stable
  * calibration. This is intentional — see AGENTS.md "WHY EV BETTING LOST MONEY".
  */
-function composeValueBetsPending(calSampleCount) {
+function composeValueBetsPending(calSampleCount, leagueCalStatus) {
   const need = MIN_CAL_SAMPLES - (calSampleCount || 0);
-  return [
+  const lines = [
     '💰 <b>Value Bets — pending calibration</b>',
     '━'.repeat(20),
     '',
     `Calibration store: <b>${calSampleCount || 0}/${MIN_CAL_SAMPLES}</b> matches`,
     need > 0 ? `${need} more resolved matches needed before +EV bets are emitted.` : '',
     '',
+  ];
+  if (leagueCalStatus) {
+    const leagueNames = { 41104:'England', 41106:'France', 41108:'Germany', 41110:'Italy', 41113:'Spain', 41114:'Turkey' };
+    lines.push('<i>Per-league calibration:</i>');
+    for (const [pid, st] of Object.entries(leagueCalStatus)) {
+      const ln = leagueNames[pid] || `League ${pid}`;
+      lines.push(`  ${ln}: ${st.count}/${MIN_CAL_SAMPLES} ${st.active ? '✅' : '⏳'}`);
+    }
+    lines.push('');
+  }
+  lines.push(
     '<i>Value bets are disabled until enough data accumulates to avoid noisy',
     'calibration that caused losses (see AGENTS.md).</i>',
-  ].filter(Boolean).join('\n');
+  );
+  return lines.filter(Boolean).join('\n');
 }
 
 module.exports = {

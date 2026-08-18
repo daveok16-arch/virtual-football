@@ -22,7 +22,7 @@ const { start: startServer, setState } = require('./server');
 const { captureFootball } = require('./capture');
 const { buildPredictions, composeReport, composeValuePicks, composeValueBetsPending, slateMeta } = require('./format-predictions');
 const { notify } = require('./telegram-notify');
-const { loadStore, saveStore, mergeResolved, calSamples } = require('./calibration-store');
+const { loadStore, saveStore, mergeResolved, calSamples, calSamplesByLeague } = require('./calibration-store');
 
 const INTERVAL = (Number(process.env.RUN_INTERVAL_SECONDS) || 300) * 1000;
 const CAPTURE = Number(process.env.CAPTURE_SECONDS) || 90;
@@ -56,7 +56,10 @@ async function runOnce() {
     if (added > 0) saveStore(store);
     console.log(`[bot] calibration store: ${store.matches.length} matches (+${added} new)`);
 
-    const allPicks = buildPredictions(leagues, { calSamples: calSamples(store) });
+    const allPicks = buildPredictions(leagues, {
+      calSamples: calSamples(store),
+      calSamplesByLeague: calSamplesByLeague(store),
+    });
     const meta = { capturedAt, ...slateMeta(allPicks) };
     const report = composeReport(allPicks, meta);
 
@@ -66,11 +69,12 @@ async function runOnce() {
     // small-sample predictions that caused real losses.
     const valueMsg = allPicks.calActive
       ? composeValuePicks(allPicks, meta)
-      : composeValueBetsPending(allPicks.calSampleCount);
+      : composeValueBetsPending(allPicks.calSampleCount, allPicks.leagueCalStatus);
 
     const nLeagues = Object.keys(leagues).length;
     const nValue = allPicks.filter((p) => p.pred.valueEv != null && p.pred.valueEv > 0).length;
-    const calStatus = allPicks.calActive ? `cal ON (${allPicks.calSampleCount})` : `cal OFF (${allPicks.calSampleCount}/100)`;
+    const activeLeagues = allPicks.leagueCalStatus ? Object.values(allPicks.leagueCalStatus).filter(s => s.active).length : 0;
+    const calStatus = allPicks.calActive ? `cal ON (${allPicks.calSampleCount} global, ${activeLeagues}/6 leagues)` : `cal OFF (${allPicks.calSampleCount}/100)`;
     const summary = `${allPicks.length} matches across ${nLeagues} leagues, ${nValue} +EV, ${calStatus}`;
     console.log(`[bot] captured ${summary}`);
     // Combine report + value bets into a single notify() call so the auto-delete
