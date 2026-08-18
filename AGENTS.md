@@ -92,6 +92,69 @@ Files: `capture.js` (reusable capture fn), `format-predictions.js` (report build
   iframe → 6s warmup → CDP Target.getTargets for virtustec. Skipping the virtuals URL
   means the iframe never loads. (Verified: fixed after initial miss.)
 
+## Deep investigation (2026-08-15) — GoldenRace RNG architecture & why EV lost money
+
+### Architecture (verified by full network capture + JS bundle analysis)
+- **RNG is 100% server-side.** The virtustec iframe JS (3MB `common.chunk.js` +
+  177KB `scheduled.module.js`) contains NO RNG/seed/match-generation logic. It is
+  pure presentation (Angular + PixiJS). Match outcomes are pre-computed on
+  GoldenRace's server and delivered to clients.
+- **Results are PRE-DETERMINED and pre-rendered.** Each resolved event carries an
+  `hlsURL` pointing to a pre-rendered video of the predetermined outcome. The video
+  exists BEFORE the scheduled kick-off time.
+- **Odds and outcomes come from the SAME server engine.** The `oddValues` arrive
+  in the same event block as the match data. The house sets odds AND determines
+  outcomes — de-vigging gives the engine's own probability estimate, NOT an
+  independent market consensus.
+- **There is nothing to reverse-engineer client-side.** No seed, no hash, no
+  provably-fair scheme exposed. The `calculationId` is a server-side batch ID for
+  pre-computed results.
+
+### WS protocol (the complete API surface)
+| Client sends | Purpose |
+|---|---|
+| `GET /session/loginHwId` | Auth (hwId + profile=WEB) |
+| `GET /session/sync` | Keep-alive / state sync |
+| `GET /playlists/` | Fetch all playlist metadata (ids list) |
+| `GET /eventBlocks/event/data` | Fetch fixtures + odds (params: contentId, eventTime, n, offset, calculationId) |
+| `GET /eventBlocks/event/result` | Fetch resolved results (same params + countDown) |
+| `GET /eventBlocks/stats` | Fetch group classification / standings |
+| `GET /tickets/findByTime` | Fetch bet tickets |
+
+### Provisioning endpoints (static config)
+- `virtual-games.virtustec.com/provisioning/footballConfigFiles/teamsHTML/{League}{Year}/40/{CODE}.png` — team logos
+- `virtual-games.virtustec.com/provisioning/rules/checkRules.txt` — game rules index
+- `virtual-games.virtustec.com/desktop-v4/default/profiles/sportybet-dark.json` — skin/profile config
+- `virtual-games.virtustec.com/desktop-v4/default/{common,scheduled.module}.chunk.js` — engine JS
+- `hls.virtustec.com/hls-service/gg/{video|audio|master}/{league}_5s/{seasonId}/{matchDayId}/{eventId}-{hGoals}-{aGoals}.m3u8` — pre-rendered match video (URL path contains the score!)
+
+### The score is in the HLS URL path
+For football: `.../germany_5s/339/335/198-0-1/468-1-0/...` — segments are `{eventId}-{homeGoals}-{awayGoals}`.
+For races: `d6-4-5-1-2334` = dog6, finishing order 4-5-1-2-3. This confirms results are pre-computed.
+
+### WHY EV BETTING LOST MONEY (root cause analysis)
+Two captures of 57 matches each showed **wildly different draw rates**: 50.9% vs 33.3%.
+With n=57, the standard error is ±6.5%, so the 95% CI spans 27%–53%. The calibration
+was chasing SAMPLE NOISE, not a real engine bias:
+- A draw-heavy sample (51%) → calibration overcorrects toward draws → recommends draws
+- The next matches the user bet on reverted toward the ~40% true rate → draw bets lost
+- The "wall of draws" in Telegram was the model amplifying noise, not finding a real edge
+
+### Is there a real edge? (honest assessment)
+- **Draw rate IS elevated in virtual football**: ~40% vs ~26% in real football (stable across both samples)
+- **De-vigged draw odds typically imply 22-33%** draw probability, suggesting the odds
+  engine systematically underprices draws by ~7-18pp
+- **BUT**: the 8.3% vig means you need the edge to exceed 8.3% AFTER accounting for sample noise
+- **With 57 matches, you CANNOT distinguish real edge from noise** (CI too wide)
+- **With 300+ accumulated matches, the edge (if real) becomes detectable** — this is why the
+  calibration store exists
+- **The calibration store has a MIN_SAMPLE_SIZE=100 guard**: value bets are only emitted
+  when the store has enough data to produce a stable calibration
+
+### Vig (overround) characteristics
+- Mean: 8.3%, Stdev: 1.4%, Range: 5.1%–9.2% — fairly uniform across matches
+- This is the house's guaranteed edge that must be overcome
+
 ## Audit findings (verified 2026-08-15) — FIXED
 - `node --check` passes; syntax valid. JSON files parse and are mutually consistent
   (same 6 playlist IDs, names match across both files). mappings load correctly at runtime.

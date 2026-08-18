@@ -12,9 +12,17 @@ const pct = (x) => `${(x * 100).toFixed(0)}%`;
  * When `withValue` is true and enough resolved matches exist, a calibration map is
  * learned from the resolved set and applied to the scheduled set so each prediction
  * carries calibratedProbabilities + per-outcome EV + valuePick (+EV outcome).
+ *
+ * MIN_CAL_SAMPLES: the calibration is only applied when this many resolved matches
+ * are available. Below this threshold, the calibration is too noisy (a 57-match
+ * sample swings between 33-51% draw rate) and value bets are NOT emitted — this
+ * prevents the "wall of draws" that caused real losses when the noisy calibration
+ * overcorrected toward whatever outcome was over-represented in a small sample.
  */
+const MIN_CAL_SAMPLES = 100;
 function buildPredictions(leagues, { withValue = true, calSamples: extraCalSamples = null } = {}) {
   let cal = null;
+  let calSampleCount = 0;
   if (withValue) {
     const train = [];
     for (const L of Object.values(leagues)) {
@@ -28,7 +36,10 @@ function buildPredictions(leagues, { withValue = true, calSamples: extraCalSampl
     // bot runs) so the calibration reflects the true outcome distribution,
     // not just the current capture's volatile 57-match sample.
     if (extraCalSamples) train.push(...extraCalSamples);
-    if (train.length >= 10) cal = learnCalibration(train);
+    calSampleCount = train.length;
+    // Gate: only calibrate with enough data. Below this, the calibration chases
+    // sample noise (see AGENTS.md "WHY EV BETTING LOST MONEY").
+    if (train.length >= MIN_CAL_SAMPLES) cal = learnCalibration(train);
   }
 
   const all = [];
@@ -39,6 +50,8 @@ function buildPredictions(leagues, { withValue = true, calSamples: extraCalSampl
       all.push({ pid, league: leagueName(pid), rec, pred });
     }
   }
+  all.calSampleCount = calSampleCount;
+  all.calActive = cal != null;
   return all;
 }
 
@@ -237,9 +250,30 @@ function slateMeta(allPicks) {
   return { avgVig: vigSum / allPicks.length };
 }
 
+/**
+ * Build the "value bets unavailable" notice shown when the calibration store
+ * hasn't accumulated enough samples (MIN_CAL_SAMPLES) to produce a stable
+ * calibration. This is intentional — see AGENTS.md "WHY EV BETTING LOST MONEY".
+ */
+function composeValueBetsPending(calSampleCount) {
+  const need = MIN_CAL_SAMPLES - (calSampleCount || 0);
+  return [
+    '💰 <b>Value Bets — pending calibration</b>',
+    '━'.repeat(20),
+    '',
+    `Calibration store: <b>${calSampleCount || 0}/${MIN_CAL_SAMPLES}</b> matches`,
+    need > 0 ? `${need} more resolved matches needed before +EV bets are emitted.` : '',
+    '',
+    '<i>Value bets are disabled until enough data accumulates to avoid noisy',
+    'calibration that caused losses (see AGENTS.md).</i>',
+  ].filter(Boolean).join('\n');
+}
+
 module.exports = {
   buildPredictions,
   composeReport,
   composeValuePicks,
+  composeValueBetsPending,
   slateMeta,
+  MIN_CAL_SAMPLES,
 };

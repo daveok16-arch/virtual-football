@@ -20,7 +20,7 @@
  */
 const { start: startServer, setState } = require('./server');
 const { captureFootball } = require('./capture');
-const { buildPredictions, composeReport, composeValuePicks, slateMeta } = require('./format-predictions');
+const { buildPredictions, composeReport, composeValuePicks, composeValueBetsPending, slateMeta } = require('./format-predictions');
 const { notify } = require('./telegram-notify');
 const { loadStore, saveStore, mergeResolved, calSamples } = require('./calibration-store');
 
@@ -59,11 +59,19 @@ async function runOnce() {
     const allPicks = buildPredictions(leagues, { calSamples: calSamples(store) });
     const meta = { capturedAt, ...slateMeta(allPicks) };
     const report = composeReport(allPicks, meta);
-    const valueMsg = composeValuePicks(allPicks, meta);
+
+    // Value bets: only emit when calibration is active (≥100 accumulated samples).
+    // Below that threshold, show a "pending" notice so the user knows why +EV bets
+    // are not shown — the calibration is intentionally gated to prevent the noisy
+    // small-sample predictions that caused real losses.
+    const valueMsg = allPicks.calActive
+      ? composeValuePicks(allPicks, meta)
+      : composeValueBetsPending(allPicks.calSampleCount);
 
     const nLeagues = Object.keys(leagues).length;
     const nValue = allPicks.filter((p) => p.pred.valueEv != null && p.pred.valueEv > 0).length;
-    const summary = `${allPicks.length} matches across ${nLeagues} leagues, ${nValue} +EV`;
+    const calStatus = allPicks.calActive ? `cal ON (${allPicks.calSampleCount})` : `cal OFF (${allPicks.calSampleCount}/100)`;
+    const summary = `${allPicks.length} matches across ${nLeagues} leagues, ${nValue} +EV, ${calStatus}`;
     console.log(`[bot] captured ${summary}`);
     // Combine report + value bets into a single notify() call so the auto-delete
     // logic (which clears the previous batch at the start of each notify) treats
