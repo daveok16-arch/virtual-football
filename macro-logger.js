@@ -26,20 +26,50 @@ const { leagueName } = require('./capture');
 
 const LOG_PATH = path.join(__dirname, 'macro-stats.jsonl');
 const SUMMARY_PATH = path.join(__dirname, 'macro-stats-summary.json');
+const readline = require('readline');
 
-// Append a resolved match to the NDJSON log (deduped by eventId)
+/**
+ * Bounded LRU set for seenIds — caps at MAX_SEEN entries and evicts the
+ * oldest when full. Since GoldenRace re-sends recent events frequently but
+ * rarely re-sends very old ones, a bounded ring is sufficient for dedup
+ * without unbounded RAM growth over hours of running.
+ * With a plain Set, seenIds would grow by ~57 IDs per 90s capture = ~2,000/hr
+ * = ~48,000/day. The bounded set caps at 5000 (~3h of matches) and costs
+ * only ~160 KB instead of ~1.5 MB for an unbounded day-long set.
+ */
+const MAX_SEEN = 5000;
 const seenIds = new Set();
-// Pre-load seen IDs from existing log to avoid duplicates across restarts
-try {
-  const existing = fs.readFileSync(LOG_PATH, 'utf8').trim().split('\n').filter(Boolean);
-  for (const line of existing) {
-    try {
-      const e = JSON.parse(line);
-      if (e.eventId) seenIds.add(e.eventId);
-    } catch {}
+const seenOrder = []; // ring buffer for eviction order
+function markSeen(id) {
+  if (seenIds.has(id)) return;
+  seenIds.add(id);
+  seenOrder.push(id);
+  if (seenOrder.length > MAX_SEEN) {
+    const evict = seenOrder.shift();
+    seenIds.delete(evict);
   }
-  console.log(`[macro] loaded ${seenIds.size} existing event IDs from log`);
-} catch {}
+}
+
+/**
+ * Pre-load seen IDs using a STREAM (readline) instead of readFileSync.
+ * Reads the file line-by-line so the entire file is never held in RAM.
+ */
+(async () => {
+  try {
+    const stream = fs.createReadStream(LOG_PATH, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    let count = 0;
+    for await (const line of rl) {
+      try {
+        const e = JSON.parse(line.trim());
+        if (e.eventId) { markSeen(e.eventId); count++; }
+      } catch {}
+    }
+    console.log(`[macro] loaded ${count} existing event IDs from log (via stream)`);
+  } catch (e) {
+    // file doesn't exist yet — fine
+  }
+})();
 
 function fairProbs(odds) {
   const [h, d, a] = odds.map(Number);
@@ -87,7 +117,8 @@ function logMatch(ev, block) {
     finalOutcome: fo.map(Number),
     outcome,
     totalGoals: hg + ag,
-    wonMarkets: r.wonMarkets || [],
+    // wonMarkets omitted — 1.8 KB per match, never used by edge-calculator or Kelly.
+    // Keeping it out saves ~3.5 MB across 2000 matches and prevents heap bloat.
   };
 }
 
@@ -95,30 +126,34 @@ function appendLog(entry) {
   fs.appendFileSync(LOG_PATH, JSON.stringify(entry) + '\n');
 }
 
-// Rolling summary — recomputed after each batch of new matches
+/**
+ * Streaming summary — reads the log line-by-line via readline so the entire
+ * file is never held in RAM. Accumulates only aggregate counters (a few KB
+ * regardless of file size) and writes the summary to disk.
+ */
 let matchCount = 0;
-function updateSummary() {
+async function updateSummary() {
   try {
-    const lines = fs.readFileSync(LOG_PATH, 'utf8').trim().split('\n').filter(Boolean);
-    const n = lines.length;
-    if (n === 0) return;
+    const stream = fs.createReadStream(LOG_PATH, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
+    let n = 0;
     const stats = {
       updatedAt: new Date().toISOString(),
-      totalMatches: n,
+      totalMatches: 0,
       overall: { home: 0, draw: 0, away: 0, totalGoals: 0, vigSum: 0 },
       byLeague: {},
       byStarDiff: { even: { h: 0, d: 0, a: 0, n: 0 }, small: { h: 0, d: 0, a: 0, n: 0 }, large: { h: 0, d: 0, a: 0, n: 0 } },
-      drawRateTrend: [], // last 20 batches of draw rate
+      drawRateTrend: [],
     };
 
     let drawRateWindow = [];
 
-    for (const line of lines) {
-      try {
-        const m = JSON.parse(line);
-      } catch { continue; }
-      const m = JSON.parse(line);
+    for await (const line of rl) {
+      let m;
+      try { m = JSON.parse(line.trim()); } catch { continue; }
+      n++;
+      stats.totalMatches = n;
       stats.overall[m.outcome]++;
       stats.overall.totalGoals += m.totalGoals;
       stats.overall.vigSum += m.overround - 1;
@@ -139,6 +174,8 @@ function updateSummary() {
       drawRateWindow.push(m.outcome === 'draw' ? 1 : 0);
     }
 
+    if (n === 0) return;
+
     stats.overall.drawRate = stats.overall.draw / n;
     stats.overall.homeRate = stats.overall.home / n;
     stats.overall.awayRate = stats.overall.away / n;
@@ -153,7 +190,6 @@ function updateSummary() {
       s.avgVig = s.vigSum / s.n;
     }
 
-    // Draw rate trend (last 100 matches, in batches of 10)
     if (drawRateWindow.length >= 10) {
       for (let i = 0; i < drawRateWindow.length; i += 10) {
         const batch = drawRateWindow.slice(i, i + 10);
@@ -173,7 +209,13 @@ async function run() {
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
       '--disable-gpu', '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process'],
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-extensions', '--disable-default-apps', '--no-first-run', '--mute-audio',
+      // Memory-saving flags for low-memory environments (Render 512MB).
+      '--single-process', '--no-zygote',
+      '--disable-background-networking', '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding', '--disable-sync', '--disable-translate',
+      '--disable-notifications', '--force-memory-pressure-off', '--max-old-space-size=256'],
     defaultViewport: { width: 1280, height: 800 },
   };
   if (process.env.PUPPETEER_EXECUTABLE_PATH) launchOpts.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
@@ -248,37 +290,40 @@ async function run() {
     let lastSummaryUpdate = 0;
 
     sub.on('Network.webSocketFrameReceived', (e) => {
-      const payload = e.response && e.response.payloadData;
+      const payload = e && e.response && e.response.payloadData;
       if (!payload) return;
-      try {
-        const parsed = JSON.parse(payload);
-        const body = parsed && parsed.res && parsed.res.body;
-        if (!Array.isArray(body)) return;
+      let parsed;
+      try { parsed = JSON.parse(payload); } catch { return; }
+      const body = parsed && parsed.res && parsed.res.body;
+      if (!Array.isArray(body)) return;
 
-        for (const b of body) {
-          if (!b || !b.events) continue;
-          if (b.serverStatus !== 'RESOLVED') continue;
+      for (const b of body) {
+        if (!b || !b.events) continue;
+        if (b.serverStatus !== 'RESOLVED') continue;
 
-          for (const ev of b.events) {
-            if (!ev || !ev.eventId) continue;
-            if (seenIds.has(ev.eventId)) continue;
+        for (const ev of b.events) {
+          if (!ev || !ev.eventId) continue;
+          if (seenIds.has(ev.eventId)) continue;
 
-            const entry = logMatch(ev, b);
-            if (!entry) continue;
+          const entry = logMatch(ev, b);
+          if (!entry) continue;
 
-            seenIds.add(ev.eventId);
-            appendLog(entry);
-            matchCount++;
-            console.log(`[macro] #${matchCount} ${entry.league} ${entry.home} v ${entry.away} → ${entry.finalOutcome[0]}-${entry.finalOutcome[1]} (${entry.outcome}) odds=${entry.odds1x2.join('/')}`);
-          }
+          markSeen(ev.eventId);
+          appendLog(entry);
+          matchCount++;
+          console.log(`[macro] #${matchCount} ${entry.league} ${entry.home} v ${entry.away} → ${entry.finalOutcome[0]}-${entry.finalOutcome[1]} (${entry.outcome}) odds=${entry.odds1x2.join('/')}`);
         }
+      }
 
-        // Update summary every 10 new matches or every 60s
-        if (matchCount > 0 && (matchCount % 10 === 0 || Date.now() - lastSummaryUpdate > 60000)) {
-          updateSummary();
-          lastSummaryUpdate = Date.now();
-        }
-      } catch {}
+      // Clear references to the parsed frame so the GC can reclaim the large
+      // WS payload (each frame can be 50-200 KB of odds/markets data).
+      parsed = null;
+
+      // Update summary every 10 new matches or every 60s (non-blocking)
+      if (matchCount > 0 && (matchCount % 10 === 0 || Date.now() - lastSummaryUpdate > 60000)) {
+        updateSummary().catch(() => {});
+        lastSummaryUpdate = Date.now();
+      }
     });
 
     // Click through leagues to trigger subscriptions
@@ -310,7 +355,17 @@ async function run() {
       await new Promise((r) => setTimeout(r, 60000)); // check every 60s
       retriggerCount++;
       // Every 5 minutes, re-click through leagues to refresh WS subscriptions
+      // AND clear accumulated old subscription data / media URL strings to
+      // prevent unbounded growth of the CDP listener's retained payloads.
       if (retriggerCount % 5 === 0 && frameEl) {
+        // Clear any old pending CDP requests that may hold large payloads
+        if (sub.pending) {
+          for (const [id, p] of sub.pending) {
+            try { p.reject(new Error('cleared by 5-min cache flush')); } catch {}
+          }
+          sub.pending.clear();
+        }
+
         const frame = await frameEl.contentFrame();
         if (frame) {
           const links = await frame.evaluate(() =>
@@ -320,12 +375,21 @@ async function run() {
             await frame.evaluate((h) => { const a = document.querySelector(`a[href="${h}"]`); if (a) a.click(); }, href).catch(() => {});
             await new Promise((r) => setTimeout(r, 2000));
           }
-          console.log(`[macro] re-triggered leagues (${seenIds.size} total matches logged)`);
+          console.log(`[macro] re-triggered leagues, flushed CDP cache (${seenIds.size} IDs tracked, ${matchCount} logged)`);
+        }
+
+        // Hint the GC to reclaim cleared frame payloads. Without this the V8
+        // heap can grow steadily as old WS payloads linger until the next
+        // major GC cycle, which may not happen before hitting the Render limit.
+        if (global.gc) {
+          global.gc();
+          const mem = process.memoryUsage();
+          console.log(`[macro] post-gc: RSS=${(mem.rss / 1048576).toFixed(0)}MB heap=${(mem.heapUsed / 1048576).toFixed(0)}MB`);
         }
       }
     }
   } finally {
-    updateSummary();
+    await updateSummary().catch(() => {});
     console.log(`[macro] shutting down. Total matches logged: ${matchCount}`);
     await browser.close().catch(() => {});
   }
@@ -334,8 +398,7 @@ async function run() {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[macro] SIGINT received, writing final summary...');
-  updateSummary();
-  process.exit(0);
+  updateSummary().catch(() => {}).finally(() => process.exit(0));
 });
 
 run().catch((e) => { console.error('[macro] FAILED:', e); process.exit(1); });

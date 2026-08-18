@@ -11,7 +11,7 @@
     "macro": "node macro-logger.js",
     "predict": "node predict.js",
     "ev": "node predict.js ev",
-    "edge": "node -e \"const {computeEdge,formatEdgeReport}=require('./edge-calculator'); console.log(formatEdgeReport(computeEdge({window:0})).replace(/<[^>]+>/g,''))\"",
+    "edge": "node -e \"const {computeEdge,formatEdgeReport}=require('./edge-calculator'); computeEdge({window:0}).then(a=>console.log(formatEdgeReport(a).replace(/<[^>]+>/g,''))).catch(e=>console.error(e))\"",
     "backtest": "node predict.js backtest"
   },
   "dependencies": {

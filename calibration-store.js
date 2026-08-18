@@ -43,16 +43,24 @@ function saveStore(store) {
  * @returns {number} how many new matches were added
  */
 function mergeResolved(store, leagues) {
-  const seen = new Set(store.matches.map((m) => m.ev.eventId));
+  const seen = new Set(store.matches.map((m) => m.eventId));
   let added = 0;
   for (const [pid, L] of Object.entries(leagues)) {
     for (const rec of L.resolved) {
-      const id = rec.ev.eventId;
-      if (id && !seen.has(id)) {
-        store.matches.push({ ev: rec.ev, pid });
-        seen.add(id);
-        added++;
-      }
+      const ev = rec.ev;
+      const id = ev.eventId;
+      if (!id || seen.has(id)) continue;
+      // MEMORY: Only store the minimal fields needed for calibration —
+      // eventId, pid, odds1x2[0:3], finalOutcome[0:2]. The full WS event
+      // (450 oddValues, stats, wonMarkets, participants = 8.4 KB each) is NOT
+      // stored; we keep ~80 bytes per match (120× reduction). This prevents
+      // OOM on Render's 512MB free tier.
+      const odds = ((ev.data && ev.data.oddValues) || []).slice(0, 3).map(Number);
+      const fo = ev.result && ev.result.finalOutcome;
+      if (odds.length < 3 || !fo || fo.length < 2) continue;
+      store.matches.push({ eventId: id, pid, odds1x2: odds, finalOutcome: fo.map(Number) });
+      seen.add(id);
+      added++;
     }
   }
   if (store.matches.length > MAX_STORE) {
@@ -65,12 +73,24 @@ function mergeResolved(store, leagues) {
  * Build {pred, actual} samples from the store for learnCalibration.
  * Standings are not needed here — calibration only uses fairProbabilities
  * (derived from odds), so we pass an empty standings map.
+ *
+ * The slim store format stores { eventId, pid, odds1x2, finalOutcome } —
+ * we reconstruct a minimal event object for predictMatch/matchResult.
  */
+function slimToEv(m) {
+  return {
+    eventId: m.eventId,
+    data: { participants: [{ classType: 'FbParticipant' }, { classType: 'FbParticipant' }], oddValues: m.odds1x2 },
+    result: { finalOutcome: m.finalOutcome.map(String) },
+  };
+}
+
 function calSamples(store) {
   const samples = [];
   for (const m of store.matches) {
-    const pred = predictMatch(m.ev, {});
-    const actual = matchResult(m.ev);
+    const ev = m.ev || slimToEv(m);
+    const pred = predictMatch(ev, {});
+    const actual = matchResult(ev);
     if (pred && actual) samples.push({ pred, actual });
   }
   return samples;
@@ -87,8 +107,9 @@ function calSamplesByLeague(store) {
   for (const m of store.matches) {
     const pid = m.pid;
     if (!pid) continue;
-    const pred = predictMatch(m.ev, {});
-    const actual = matchResult(m.ev);
+    const ev = m.ev || slimToEv(m);
+    const pred = predictMatch(ev, {});
+    const actual = matchResult(ev);
     if (pred && actual) {
       if (!byLeague[pid]) byLeague[pid] = [];
       byLeague[pid].push({ pred, actual });

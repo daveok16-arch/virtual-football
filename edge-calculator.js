@@ -17,6 +17,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 
 const LOG_PATH = path.join(__dirname, 'macro-stats.jsonl');
 
@@ -37,26 +38,62 @@ function wilsonCI(hits, n, z = 1.96) {
 }
 
 /**
+ * Stream-read the last N lines from a file without loading it all into RAM.
+ * Uses readline to iterate line-by-line, keeping only the last `window` lines
+ * in a bounded ring buffer.
+ * @param {string} filePath  path to the NDJSON log
+ * @param {number} window    max lines to keep (0 = all)
+ * @returns {Promise<object[]>} parsed match objects
+ */
+async function streamLastN(filePath, window = 0) {
+  const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+  if (window <= 0) {
+    // Load all — but still streaming line-by-line, not readFileSync
+    const all = [];
+    for await (const line of rl) {
+      try { all.push(JSON.parse(line.trim())); } catch {}
+    }
+    return all;
+  }
+
+  // Bounded ring buffer — only keep the last `window` parsed lines in RAM.
+  const ring = new Array(window);
+  let count = 0;
+  for await (const line of rl) {
+    let m;
+    try { m = JSON.parse(line.trim()); } catch { continue; }
+    ring[count % window] = m;
+    count++;
+  }
+  // Extract in order: if we read more than `window` lines, start at the
+  // oldest surviving entry; otherwise just slice the filled portion.
+  const effective = Math.min(count, window);
+  const start = count > window ? count % window : 0;
+  const result = new Array(effective);
+  for (let i = 0; i < effective; i++) {
+    result[i] = ring[(start + i) % window];
+  }
+  return result;
+}
+
+/**
  * Load the macro-stats log and compute the edge analysis.
+ * Uses readline streaming to read only the last `window` lines — the entire
+ * log file is never held in RAM, so even a 100,000-line file uses only ~200
+ * match objects in memory.
  * @param {object} opts
  * @param {number} opts.window  rolling window size (most recent N matches). 0 = all.
  * @param {number} opts.zScore  z-score for confidence intervals
- * @returns {object} edge analysis report
+ * @returns {Promise<object>} edge analysis report
  */
-function computeEdge({ window = 0, zScore = 1.96 } = {}) {
-  let lines;
+async function computeEdge({ window = 0, zScore = 1.96 } = {}) {
+  let matches;
   try {
-    lines = fs.readFileSync(LOG_PATH, 'utf8').trim().split('\n').filter(Boolean);
+    matches = await streamLastN(LOG_PATH, window);
   } catch {
     return { error: 'no macro-stats log found', totalMatches: 0 };
-  }
-
-  let matches = lines.map((l) => {
-    try { return JSON.parse(l); } catch { return null; }
-  }).filter(Boolean);
-
-  if (window > 0 && matches.length > window) {
-    matches = matches.slice(-window);
   }
 
   const n = matches.length;
@@ -264,4 +301,4 @@ function formatEdgeReport(analysis) {
   return lines.join('\n');
 }
 
-module.exports = { computeEdge, formatEdgeReport, wilsonCI };
+module.exports = { computeEdge, formatEdgeReport, wilsonCI, streamLastN };

@@ -30,6 +30,17 @@ const INTERVAL = (Number(process.env.RUN_INTERVAL_SECONDS) || 300) * 1000;
 const CAPTURE = Number(process.env.CAPTURE_SECONDS) || 90;
 let running = false;
 
+// Memory monitor — logs RSS (resident set size) every cycle to help identify
+// leaks on Render's 512MB free tier.
+function logMemory(label) {
+  const mem = process.memoryUsage();
+  console.log(
+    `[mem] ${label}: RSS=${(mem.rss / 1024 / 1024).toFixed(0)}MB ` +
+    `heap=${(mem.heapUsed / 1024 / 1024).toFixed(0)}/${(mem.heapTotal / 1024 / 1024).toFixed(0)}MB ` +
+    `ext=${(mem.external / 1024 / 1024).toFixed(0)}MB`
+  );
+}
+
 // Never let an unexpected error crash the service — Render would restart it and
 // we'd lose the health server. Log and keep going.
 process.on('unhandledRejection', (e) => {
@@ -46,9 +57,11 @@ async function runOnce() {
   }
   running = true;
   const capturedAt = Date.now();
+  logMemory('run-start');
   console.log(`[bot] run # starting — capturing for ${CAPTURE}s ...`);
   try {
     const leagues = await captureFootball(CAPTURE);
+    logMemory('post-capture');
 
     // Persist newly-captured resolved matches into the calibration store so the
     // calibration trains on an accumulating sample (stabilises the draw rate
@@ -63,13 +76,13 @@ async function runOnce() {
     try {
       const macroLines = require('fs').readFileSync(require('path').join(__dirname, 'macro-stats.jsonl'), 'utf8').trim().split('\n').filter(Boolean);
       let macroAdded = 0;
-      const seen = new Set(store.matches.map((m) => m.ev.eventId));
+      const seen = new Set(store.matches.map((m) => m.eventId));
       for (const line of macroLines) {
         try {
           const m = JSON.parse(line);
           if (m.eventId && !seen.has(m.eventId)) {
-            // Reconstruct the event structure for the store
-            store.matches.push({ ev: { eventId: m.eventId, data: { participants: [], oddValues: m.odds1x2 }, result: { finalOutcome: m.finalOutcome.map(String), wonMarkets: m.wonMarkets } }, pid: m.playlistId });
+            // Slim format — same as mergeResolved: only store what calibration needs
+            store.matches.push({ eventId: m.eventId, pid: m.playlistId, odds1x2: m.odds1x2, finalOutcome: m.finalOutcome });
             seen.add(m.eventId);
             macroAdded++;
           }
@@ -90,7 +103,7 @@ async function runOnce() {
     const report = composeReport(allPicks, meta);
 
     // Edge-Deficit Analysis (from macro-stats log or calibration store)
-    const edgeAnalysis = computeEdge({ window: 200 });
+    const edgeAnalysis = await computeEdge({ window: 200 });
     const edgeReport = edgeAnalysis.error ? null : formatEdgeReport(edgeAnalysis);
 
     // Kelly-sized value bets (replaces the old composeValuePicks)
@@ -114,6 +127,8 @@ async function runOnce() {
 
     const tgOk = await notify(fullReport);
     if (!tgOk) console.log('[bot] (Telegram not configured or failed — report printed above)');
+
+    logMemory('post-notify');
 
     setState({
       lastRunAt: capturedAt,

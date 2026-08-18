@@ -78,6 +78,28 @@ function newLeagues() {
         }
       }
     },
+    /**
+     * Clear old scheduled events that have already been captured to prevent
+     * unbounded Map growth during long capture sessions. GoldenRace re-sends
+     * the same scheduled events in every frame, so the Maps are naturally
+     * deduped by eventId — but over hours, thousands of unique event IDs
+     * accumulate. This prunes scheduled events older than `maxAgeMs`.
+     * Resolved events are NEVER pruned (needed for calibration).
+     */
+    pruneScheduled(maxAgeMs = 600000) {
+      const now = Date.now();
+      let pruned = 0;
+      for (const L of Object.values(leagues)) {
+        for (const [id, rec] of L._scheduled) {
+          const age = now - (rec.eventTime || 0);
+          if (age > maxAgeMs) {
+            L._scheduled.delete(id);
+            pruned++;
+          }
+        }
+      }
+      return pruned;
+    },
     // Flatten the Maps to arrays for the prediction model.
     finalize() {
       for (const L of Object.values(leagues)) {
@@ -109,6 +131,7 @@ function createSubSession(parentClient, targetId) {
   const listeners = new Map();
   const sub = {
     sessionId: null,
+    pending, // expose for periodic cache flushing
     on(event, cb) {
       if (!listeners.has(event)) listeners.set(event, []);
       listeners.get(event).push(cb);
@@ -177,6 +200,18 @@ async function captureFootball(captureSeconds) {
       '--disable-default-apps',
       '--no-first-run',
       '--mute-audio',
+      // Memory-saving flags for low-memory environments (Render 512MB).
+      '--single-process',        // no zygote → fewer forked processes
+      '--no-zygote',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
+      '--disable-component-extensions-with-background-pages',
+      '--disable-sync',
+      '--disable-translate',
+      '--disable-notifications',
+      '--force-memory-pressure-off', // prevent Chrome from discarding tabs
+      '--max-old-space-size=256',    // cap V8 heap for the renderer
     ],
     defaultViewport: { width: 1280, height: 800 },
   };
@@ -242,6 +277,7 @@ async function captureFootball(captureSeconds) {
     console.log('[capture] CDP sub-session attached, Network.enable sent');
 
     let wsFrameCount = 0;
+    let lastCacheFlush = Date.now();
     // Attach the WS listener immediately — the iframe's WebSocket may push the
     // initial fixture/standings burst as soon as it attaches.
     sub.on('Network.webSocketFrameReceived', (e) => {
@@ -261,6 +297,30 @@ async function captureFootball(captureSeconds) {
       if (isFootball) {
         collector.ingest(parsed);
         console.log(`[capture] football frame #${wsFrameCount}: ${body.length} blocks`);
+
+        // Clear the parsed frame reference so the large WS payload (50-200 KB
+        // of odds/markets/standings data) can be GC'd immediately after the
+        // collector extracts the fields it needs. Without this, V8 retains the
+        // full frame in the closure scope until the next major GC sweep.
+        parsed = null;
+      } else {
+        parsed = null;
+      }
+
+      // Every 5 minutes (300s), flush old pending CDP requests, prune stale
+      // scheduled events, and hint GC. This clears accumulated old subscription
+      // data and media URL strings from the CDP listener's retained payloads.
+      if (Date.now() - lastCacheFlush > 300000) {
+        lastCacheFlush = Date.now();
+        if (sub.pending && sub.pending.size > 0) {
+          for (const [id, p] of sub.pending) {
+            try { p.reject(new Error('flushed by 5-min cache clear')); } catch {}
+          }
+          sub.pending.clear();
+        }
+        const pruned = collector.pruneScheduled(600000);
+        if (global.gc) global.gc();
+        console.log(`[capture] 5-min cache flush: pruned ${pruned} old scheduled events, GC'd`);
       }
     });
 

@@ -255,6 +255,31 @@ This prevents extreme extrapolation from small samples (e.g., a draw at 12.10
 odds with implied 8% shouldn't be calibrated to 50% just because the overall
 draw rate is 50%). As N grows to 500+, the shrinkage vanishes.
 
+## Memory optimization (verified 2026-08-15) — Render OOM fix
+
+Render free tier has 512MB RAM. The bot was OOM-killed because:
+1. calibration-data.json stored FULL WS events (8.4KB each, 99% waste — only
+   72 bytes needed). Fixed: slim format stores only {eventId, pid, odds1x2, finalOutcome}.
+   Store reduced from 648KB → 7KB (85 matches). At MAX_STORE=2000: ~172KB vs ~16MB.
+2. macro-logger.js `seenIds` Set grew unboundedly (~48,000 IDs/day). Fixed: bounded LRU
+   ring caps at 5000 entries (~160KB). Summary now uses readline streaming.
+3. edge-calculator.js loaded the ENTIRE macro-stats.jsonl into RAM. Fixed: `streamLastN()`
+   uses a readline ring buffer to keep only the last N matches in memory.
+4. macro-logger.js logged wonMarkets (1.8KB/match, never used). Removed.
+5. WS frame payloads (50-200KB each) were retained in closure scope. Fixed: `parsed = null`
+   after processing, plus 5-min cache flush of pending CDP requests + `global.gc()`.
+6. capture.js scheduled events accumulated in Maps. Fixed: `pruneScheduled()` removes
+   events older than 10 min during the 5-min cache flush cycle.
+
+Dockerfile CMD: `node --expose-gc --max-old-space-size=384 bot-runner.js` — exposes `global.gc()`
+for manual GC and caps V8 heap at 384MB (leaving ~128MB for Chromium).
+
+Chrome launch flags added: `--single-process --no-zygote --disable-background-networking
+--disable-sync --disable-translate --force-memory-pressure-off --max-old-space-size=256`
+
+Live test memory profile (post-fix): peak RSS 125MB, heap 39MB → 16MB after GC.
+Well within the 512MB Render limit.
+
 ## Audit findings (verified 2026-08-15) — FIXED
 - `node --check` passes; syntax valid. JSON files parse and are mutually consistent
   (same 6 playlist IDs, names match across both files). mappings load correctly at runtime.

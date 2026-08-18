@@ -46,4 +46,7 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV NODE_ENV=production
 
 EXPOSE 10000
-CMD ["node", "bot-runner.js"]
+# Cap Node.js heap at 384MB and expose GC for manual memory management.
+# The --expose-gc flag makes global.gc() available so the 5-min cache flush
+# can force a GC cycle to reclaim cleared WS payloads before Render's OOM killer hits.
+CMD ["node", "--expose-gc", "--max-old-space-size=384", "bot-runner.js"]
